@@ -18,9 +18,11 @@ load_dotenv()
 
 # --- Database Setup (largely unchanged) ---
 import os
+# 优先使用环境变量中的数据库URL，如果没有设置则使用默认路径
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
-DATABASE_URL = f"sqlite:///{os.path.join(parent_dir, 'fpl_data_loader/fpl.db')}"
+default_db_path = os.path.join(parent_dir, 'fpl_data_loader/fpl.db')
+DATABASE_URL = os.environ.get('DATABASE_URL', f"sqlite:///{default_db_path}")
 
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

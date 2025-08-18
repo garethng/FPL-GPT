@@ -10,9 +10,9 @@ import requests
 
 dotenv.load_dotenv()
 
-# Get the absolute path of the directory where the script is located
+# 获取数据库路径，优先使用环境变量
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_NAME = os.path.join(SCRIPT_DIR, 'fpl.db')
+DB_NAME = os.environ.get('DB_PATH', os.path.join(SCRIPT_DIR, 'fpl.db'))
 HUB_URL = "https://www.fantasyfootballhub.co.uk/player-data/player-data.json"
 
 def create_tables(cursor):

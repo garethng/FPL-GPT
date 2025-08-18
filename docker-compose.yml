@@ -1,0 +1,32 @@
+version: '3'
+
+services:
+  fpl-data-loader:
+    build:
+      context: ./fpl_data_loader
+      dockerfile: Dockerfile
+    volumes:
+      - fpl-database:/app/data
+      - ./.env:/app/.env
+    environment:
+      - DB_PATH=/app/data/fpl.db
+    restart: unless-stopped
+
+  mcp-server:
+    build:
+      context: ./mcp_server
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - fpl-database:/app/data
+      - ./.env:/app/.env
+    environment:
+      - DB_PATH=/app/data/fpl.db
+    depends_on:
+      - fpl-data-loader
+    restart: unless-stopped
+
+volumes:
+  fpl-database:
+    # 使用命名卷来共享SQLite数据库
