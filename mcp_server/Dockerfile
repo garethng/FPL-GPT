@@ -30,7 +30,7 @@ mkdir -p /app/data
 export DATABASE_URL="sqlite:///\${DB_PATH:-/app/data/fpl.db}"
 
 # 启动MCP服务器
-exec mcp serve main.py --host 0.0.0.0 --port 8000
+exec python main.py
 EOF
 
 RUN chmod +x /app/entrypoint.sh

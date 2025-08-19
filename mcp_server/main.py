@@ -376,3 +376,5 @@ async def get_my_team(ctx: T_AppContext) -> MyTeam | Content:
 
 # To run this server for development, run the following command from the project root:
 # mcp dev mcp_server/main.py
+if __name__ == "__main__":
+    app.run(transport="streamable-http")
