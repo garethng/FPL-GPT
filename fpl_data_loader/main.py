@@ -132,13 +132,29 @@ async def update_data():
     # Part 2: Connect to DB and insert FPL data
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
+    
+    # 在更新前获取现有球员价格
+    cursor.execute("SELECT id, now_cost, web_name FROM players")
+    existing_players = {row[0]: {'cost': row[1], 'name': row[2]} for row in cursor.fetchall()}
+
     create_tables(cursor)
+
+    price_changes = []
 
     for team in teams_data:
         cursor.execute("INSERT OR REPLACE INTO teams (id, name, short_name) VALUES (?, ?, ?)",
                        (team.id, team.name, team.short_name))
 
     for player in players:
+        old_player_info = existing_players.get(player.id)
+        if old_player_info and old_player_info['cost'] != player.now_cost:
+            price_changes.append({
+                'player_id': player.id,
+                'web_name': player.web_name,
+                'old_cost': old_player_info['cost'],
+                'new_cost': player.now_cost
+            })
+
         player_data = (
             player.id, player.web_name, player.first_name, player.second_name, player.team, player.team_code,
             player.element_type, player.now_cost, player.total_points, player.minutes, player.goals_scored, player.assists,
@@ -246,7 +262,45 @@ async def update_data():
 
     conn.commit()
     conn.close()
+    
+    # 如果有价格变动，则发送 webhook
+    # if price_changes:
+    #     send_price_change_webhook(price_changes)
+        
     print(f"[{datetime.now()}] Data has been successfully updated in {DB_NAME}")
+
+def send_price_change_webhook(price_changes):
+    webhook_url = "https://www.feishu.cn/flow/api/trigger-webhook/66148a80728f8b9b94ca8274015bfa93"
+    if not webhook_url:
+        print("PRICE_CHANGE_WEBHOOK_URL not set, skipping webhook.")
+        return
+
+    payloads = [{
+        "text": "FPL Player Price Changes",
+        "attachments": [
+            {
+                "color": "#36a64f",
+                "pretext": f"{len(price_changes)} player(s) have price changes:",
+                "fields": [
+                    {
+                        "title": f"{change['web_name']} ({change['player_id']})",
+                        "value": f"Old: {change['old_cost']/10:.1f}M, New: {change['new_cost']/10:.1f}M",
+                        "add": True if change['old_cost'] < change['new_cost'] else False
+                    } 
+                ],
+                "footer": "FPL Price Change Notifier",
+                "ts": int(datetime.now().timestamp())
+            }
+        ]
+    } for change in price_changes] 
+    
+    for payload in payloads:
+        try:
+            response = requests.post(webhook_url, json=payload)
+            response.raise_for_status()
+            print(f"[{datetime.now()}] Successfully sent price change webhook.")
+        except requests.exceptions.RequestException as e:
+            print(f"Error sending price change webhook: {e}")
 
 def query_player_by_name(name):
     conn = sqlite3.connect(DB_NAME)
