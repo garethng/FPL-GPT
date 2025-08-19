@@ -3,7 +3,7 @@ FROM python:3.9-slim
 WORKDIR /app
 
 # 安装cron
-RUN apt-get update && apt-get -y install cron
+RUN sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list && apt-get update && apt-get -y install --no-install-recommends cron && rm -rf /var/lib/apt/lists/*
 
 # 创建数据目录
 RUN mkdir -p /app/data
@@ -11,9 +11,11 @@ RUN mkdir -p /app/data
 # 复制需要的文件
 COPY requirements.txt .
 COPY main.py .
+COPY ../fpl ./fpl
 
 # 安装依赖
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
+RUN pip install ./fpl
 
 # 创建.env文件的挂载点
 RUN touch .env

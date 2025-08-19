@@ -9,11 +9,12 @@ RUN mkdir -p /app/data
 COPY requirements.txt .
 COPY main.py .
 COPY __init__.py .
+COPY ../fpl ./fpl
 
 # 安装依赖
-RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install --no-cache-dir mcp-server fpl
-
+RUN pip install mcp -i http://mirrors.aliyun.com/pypi/simple/
+RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
+RUN pip install ./fpl
 # 创建.env文件的挂载点
 RUN touch .env
 
