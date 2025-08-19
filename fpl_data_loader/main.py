@@ -12,7 +12,8 @@ dotenv.load_dotenv()
 
 # 获取数据库路径，优先使用环境变量
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_NAME = os.environ.get('DB_PATH', os.path.join(SCRIPT_DIR, 'fpl.db'))
+PARENT_DIR = os.path.dirname(SCRIPT_DIR)
+DB_NAME = os.environ.get('DB_PATH', os.path.join(PARENT_DIR, 'db', 'fpl.db'))
 HUB_URL = "https://www.fantasyfootballhub.co.uk/player-data/player-data.json"
 
 def create_tables(cursor):
@@ -104,7 +105,11 @@ def create_tables(cursor):
         player_id INTEGER,
         gw INTEGER,
         predicted_pts REAL,
-        FOREIGN KEY (player_id) REFERENCES players (id)
+        opponent_team_id INTEGER,
+        is_home BOOLEAN,
+        difficulty INTEGER,
+        FOREIGN KEY (player_id) REFERENCES players (id),
+        FOREIGN KEY (opponent_team_id) REFERENCES teams (id)
     )
     ''')
 
@@ -119,6 +124,10 @@ async def update_data():
     print(f"[{datetime.now()}] Fetched players from FPL API")
     teams_data = await fpl.get_teams()
     print(f"[{datetime.now()}] Fetched teams from FPL API")
+    
+    # 获取赛程信息
+    fixtures = await fpl.get_fixtures()
+    print(f"[{datetime.now()}] Fetched fixtures from FPL API")
 
     # Part 2: Connect to DB and insert FPL data
     conn = sqlite3.connect(DB_NAME)
@@ -166,6 +175,34 @@ async def update_data():
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', history_data)
     
+    # 创建轮次与赛程的映射
+    fixtures_by_team_gw = {}
+    for fixture in fixtures:
+        if fixture.event is None:  # 跳过没有轮次信息的赛程
+            continue
+        
+        gw = fixture.event
+        team_h = fixture.team_h
+        team_a = fixture.team_a
+        
+        # 为主队添加赛程信息
+        if team_h not in fixtures_by_team_gw:
+            fixtures_by_team_gw[team_h] = {}
+        fixtures_by_team_gw[team_h][gw] = {
+            'opponent_team_id': team_a,
+            'is_home': True,
+            'difficulty': fixture.team_h_difficulty
+        }
+        
+        # 为客队添加赛程信息
+        if team_a not in fixtures_by_team_gw:
+            fixtures_by_team_gw[team_a] = {}
+        fixtures_by_team_gw[team_a][gw] = {
+            'opponent_team_id': team_h,
+            'is_home': False,
+            'difficulty': fixture.team_a_difficulty
+        }
+    
     # Part 3: Fetch and insert prediction data from Hub
     print(f"[{datetime.now()}] Fetching prediction data from Fantasy Football Hub...")
     try:
@@ -178,10 +215,32 @@ async def update_data():
             fpl_info = hub_player.get('fpl', {})
             player_id = fpl_info.get('id')
             if player_id:
+                # 获取球员所属球队ID
+                cursor.execute("SELECT team_id FROM players WHERE id = ?", (player_id,))
+                result = cursor.fetchone()
+                if not result:
+                    continue
+                
+                team_id = result[0]
+                team_fixtures = fixtures_by_team_gw.get(team_id, {})
+                
                 predictions = hub_player.get('data', {}).get('predictions', [])
                 for prediction in predictions:
-                    cursor.execute("INSERT INTO predictions (player_id, gw, predicted_pts) VALUES (?, ?, ?)",
-                                   (player_id, prediction.get('gw'), prediction.get('predicted_pts')))
+                    gw = prediction.get('gw')
+                    predicted_pts = prediction.get('predicted_pts')
+                    
+                    # 获取该轮次的赛程信息
+                    fixture_info = team_fixtures.get(gw, {})
+                    opponent_team_id = fixture_info.get('opponent_team_id')
+                    is_home = fixture_info.get('is_home')
+                    difficulty = fixture_info.get('difficulty')
+                    
+                    # 插入预测数据，包括对阵和难度信息
+                    cursor.execute("""
+                        INSERT INTO predictions 
+                        (player_id, gw, predicted_pts, opponent_team_id, is_home, difficulty) 
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, (player_id, gw, predicted_pts, opponent_team_id, is_home, difficulty))
     except requests.exceptions.RequestException as e:
         print(f"Error fetching prediction data: {e}")
 
@@ -218,14 +277,23 @@ def query_player_by_name(name):
                 venue = "Home" if was_home else "Away"
                 print(f"{gw:<10} {opponent:<10} {venue:<10} {points:<10}")
 
-        cursor.execute("SELECT gw, predicted_pts FROM predictions WHERE player_id = ? ORDER BY gw", (player_id,))
+        cursor.execute("""
+            SELECT p.gw, p.predicted_pts, t.short_name, p.is_home, p.difficulty 
+            FROM predictions p 
+            LEFT JOIN teams t ON p.opponent_team_id = t.id 
+            WHERE p.player_id = ? 
+            ORDER BY p.gw
+        """, (player_id,))
         predictions = cursor.fetchall()
 
         if predictions:
             print("\nFuture Predictions (Predicted Points):")
-            print(f"{'Gameweek':<10} {'Predicted Points':<20}")
-            for gw, pts in predictions:
-                print(f"{gw:<10} {pts:.2f}")
+            print(f"{'Gameweek':<10} {'Opponent':<10} {'Venue':<10} {'Difficulty':<10} {'Predicted Points':<20}")
+            for gw, pts, opponent, is_home, difficulty in predictions:
+                venue = "Home" if is_home else "Away"
+                difficulty_str = str(difficulty) if difficulty is not None else "N/A"
+                opponent_str = opponent if opponent is not None else "N/A"
+                print(f"{gw:<10} {opponent_str:<10} {venue:<10} {difficulty_str:<10} {pts:.2f}")
 
     conn.close()
 

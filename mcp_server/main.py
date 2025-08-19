@@ -1,9 +1,9 @@
 import asyncio
-from typing import List, Optional, AsyncIterator, Union
+from typing import List, Optional, AsyncIterator, Dict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
-from sqlalchemy import create_engine, Column, Integer, String, Float, ForeignKey, inspect
+from sqlalchemy import create_engine, Column, Integer, String, Float, ForeignKey, inspect, Boolean
 from sqlalchemy.orm import sessionmaker, Session, relationship, declarative_base
 from pydantic import BaseModel, ConfigDict
 from dotenv import load_dotenv
@@ -21,7 +21,7 @@ import os
 # 优先使用环境变量中的数据库URL，如果没有设置则使用默认路径
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
-default_db_path = os.path.join(parent_dir, 'fpl_data_loader/fpl.db')
+default_db_path = os.path.join(parent_dir, 'db/fpl.db')
 DATABASE_URL = os.environ.get('DATABASE_URL', f"sqlite:///{default_db_path}")
 
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
@@ -66,6 +66,37 @@ class Player(Base):
     event_points = Column(Integer)
     team = relationship("Team", back_populates="players")
     predictions = relationship("Prediction", back_populates="player")
+    history = relationship("PlayerHistory", back_populates="player")
+
+class PlayerHistory(Base):
+    __tablename__ = "player_history"
+    id = Column(Integer, primary_key=True, index=True)
+    player_id = Column(Integer, ForeignKey("players.id"))
+    fixture_id = Column(Integer)
+    opponent_team_id = Column(Integer, ForeignKey("teams.id"))
+    total_points = Column(Integer)
+    was_home = Column(Boolean)
+    kickoff_time = Column(String)
+    round = Column(Integer)
+    minutes = Column(Integer)
+    goals_scored = Column(Integer)
+    assists = Column(Integer)
+    clean_sheets = Column(Integer)
+    goals_conceded = Column(Integer)
+    own_goals = Column(Integer)
+    penalties_saved = Column(Integer)
+    penalties_missed = Column(Integer)
+    yellow_cards = Column(Integer)
+    red_cards = Column(Integer)
+    saves = Column(Integer)
+    bonus = Column(Integer)
+    bps = Column(Integer)
+    influence = Column(Float)
+    creativity = Column(Float)
+    threat = Column(Float)
+    ict_index = Column(Float)
+    player = relationship("Player", back_populates="history")
+    opponent_team = relationship("Team")
 
 class Prediction(Base):
     __tablename__ = "predictions"
@@ -73,7 +104,11 @@ class Prediction(Base):
     player_id = Column(Integer, ForeignKey("players.id"))
     gw = Column(Integer)
     predicted_pts = Column(Float)
+    opponent_team_id = Column(Integer, ForeignKey("teams.id"))
+    is_home = Column(Boolean)
+    difficulty = Column(Integer)
     player = relationship("Player", back_populates="predictions")
+    opponent_team = relationship("Team")
 
 
 # --- Pydantic Models for tool outputs ---
@@ -83,6 +118,20 @@ class FPLBaseModel(BaseModel):
 class PredictionBase(FPLBaseModel):
     gw: int
     predicted_pts: float
+    opponent_team: Optional[str] = None
+    is_home: Optional[bool] = None
+    difficulty: Optional[int] = None
+
+class PlayerHistoryBase(FPLBaseModel):
+    round: int
+    opponent_team: str
+    was_home: bool
+    total_points: int
+    minutes: int
+    goals_scored: int
+    assists: int
+    clean_sheets: int
+    bonus: int
 
 class PlayerBase(FPLBaseModel):
     id: int
@@ -172,7 +221,7 @@ async def list_teams(ctx: T_AppContext) -> List[TeamBase]:
     return [TeamBase.model_validate(t) for t in teams]
 
 @app.tool()
-async def get_team(ctx: T_AppContext, team_id: int) -> Union[TeamBase, Content]:
+async def get_team(ctx: T_AppContext, team_id: int) -> TeamBase | Content:
     """Gets a specific team by its ID."""
     db = ctx.request_context.lifespan_context.db
     team = db.query(Team).filter(Team.id == team_id).first()
@@ -193,7 +242,7 @@ async def list_players(ctx: T_AppContext, name: Optional[str] = None) -> List[Pl
     return [PlayerBase.model_validate(p) for p in players]
 
 @app.tool()
-async def get_player(ctx: T_AppContext, player_id: int) -> Union[PlayerBase, Content]:
+async def get_player(ctx: T_AppContext, player_id: int) -> PlayerBase | Content:
     """Gets a specific player by their ID."""
     db = ctx.request_context.lifespan_context.db
     player = db.query(Player).filter(Player.id == player_id).first()
@@ -202,17 +251,61 @@ async def get_player(ctx: T_AppContext, player_id: int) -> Union[PlayerBase, Con
     return PlayerBase.model_validate(player)
 
 @app.tool()
-async def get_player_predictions(ctx: T_AppContext, player_id: int) -> Union[List[PredictionBase], Content]:
+async def get_player_predictions(ctx: T_AppContext, player_id: int) -> List[PredictionBase] | Content:
     """Gets future gameweek predictions for a specific player."""
     db = ctx.request_context.lifespan_context.db
+    
+    # 获取球员预测，并直接使用数据库中的对阵信息
     predictions = db.query(Prediction).filter(Prediction.player_id == player_id).order_by(Prediction.gw).all()
     if not predictions:
         return Content(text=f"Predictions not found for player with id {player_id}")
-    return [PredictionBase.model_validate(p) for p in predictions]
+    
+    # 构建Pydantic模型列表作为返回结果
+    result = []
+    for p in predictions:
+        result.append(
+            PredictionBase(
+                gw=p.gw,
+                predicted_pts=p.predicted_pts,
+                opponent_team=p.opponent_team.name if p.opponent_team else "N/A",
+                is_home=p.is_home,
+                difficulty=p.difficulty
+            )
+        )
+        
+    return result
 
 
 @app.tool()
-async def get_my_team(ctx: T_AppContext) -> Union[MyTeam, Content]:
+async def get_player_history(ctx: T_AppContext, player_id: int) -> List[PlayerHistoryBase] | Content:
+    """Gets the past gameweek performance history for a specific player."""
+    db = ctx.request_context.lifespan_context.db
+    
+    history = db.query(PlayerHistory).filter(PlayerHistory.player_id == player_id).order_by(PlayerHistory.round).all()
+    if not history:
+        return Content(text=f"History not found for player with id {player_id}")
+    
+    result = []
+    for h in history:
+        result.append(
+            PlayerHistoryBase(
+                round=h.round,
+                opponent_team=h.opponent_team.name if h.opponent_team else "N/A",
+                was_home=h.was_home,
+                total_points=h.total_points,
+                minutes=h.minutes,
+                goals_scored=h.goals_scored,
+                assists=h.assists,
+                clean_sheets=h.clean_sheets,
+                bonus=h.bonus,
+            )
+        )
+        
+    return result
+
+
+@app.tool()
+async def get_my_team(ctx: T_AppContext) -> MyTeam | Content:
     """
     Retrieves the logged-in user's team for the current gameweek,
     including available chips, free transfers, total points and overall rank.
