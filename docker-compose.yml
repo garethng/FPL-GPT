@@ -3,8 +3,8 @@ version: '3'
 services:
   fpl-data-loader:
     build:
-      context: ./fpl_data_loader
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: ./fpl_data_loader/Dockerfile
     volumes:
       - fpl-database:/app/data
       - ./.env:/app/.env
@@ -14,8 +14,8 @@ services:
 
   mcp-server:
     build:
-      context: ./mcp_server
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: ./mcp_server/Dockerfile
     ports:
       - "8000:8000"
     volumes:

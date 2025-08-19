@@ -6,13 +6,12 @@ WORKDIR /app
 RUN mkdir -p /app/data
 
 # 复制项目文件
-COPY requirements.txt .
-COPY main.py .
-COPY __init__.py .
-COPY ../fpl ./fpl
+COPY ./mcp_server/requirements.txt .
+COPY ./mcp_server/main.py .
+COPY ./mcp_server/__init__.py .
+COPY ./fpl ./fpl
 
 # 安装依赖
-RUN pip install mcp -i http://mirrors.aliyun.com/pypi/simple/
 RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
 RUN pip install ./fpl
 # 创建.env文件的挂载点

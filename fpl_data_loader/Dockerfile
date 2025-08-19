@@ -9,9 +9,9 @@ RUN sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list && apt
 RUN mkdir -p /app/data
 
 # 复制需要的文件
-COPY requirements.txt .
-COPY main.py .
-COPY ../fpl ./fpl
+COPY ./fpl_data_loader/requirements.txt .
+COPY ./fpl_data_loader/main.py .
+COPY ./fpl ./fpl
 
 # 安装依赖
 RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
