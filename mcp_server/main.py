@@ -24,6 +24,14 @@ parent_dir = os.path.dirname(current_dir)
 default_db_path = os.path.join(parent_dir, 'db/fpl.db')
 DATABASE_URL = os.environ.get('DATABASE_URL', f"sqlite:///{default_db_path}")
 
+# Ensure the database directory exists
+db_dir = os.path.dirname(default_db_path)
+if DATABASE_URL.startswith("sqlite"):
+    db_path = DATABASE_URL.split("sqlite:///")[-1]
+    db_dir = os.path.dirname(db_path)
+    if not os.path.exists(db_dir):
+        os.makedirs(db_dir)
+
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -178,6 +186,9 @@ class AppContext:
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     """Manage the database session and FPL client lifecycle."""
+    # Create tables if they don't exist
+    Base.metadata.create_all(bind=engine)
+
     db = SessionLocal()
     fpl_client = FPL()
     email = os.getenv("FPL_EMAIL")

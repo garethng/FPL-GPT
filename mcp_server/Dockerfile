@@ -12,7 +12,7 @@ COPY ./mcp_server/__init__.py .
 COPY ./fpl ./fpl
 
 # 安装依赖
-RUN RUN pip config set global.index-url http://mirrors.aliyun.com/pypi/simple/
+RUN pip config set global.index-url http://mirrors.aliyun.com/pypi/simple/
 RUN pip install --no-cache-dir -r requirements.txt
 RUN pip install mcp
 RUN pip install ./fpl

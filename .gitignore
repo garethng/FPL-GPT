@@ -2,3 +2,4 @@
 analysis/
 *.db
 __pycache__/
+/db

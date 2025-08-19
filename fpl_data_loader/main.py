@@ -16,12 +16,17 @@ PARENT_DIR = os.path.dirname(SCRIPT_DIR)
 DB_NAME = os.environ.get('DB_PATH', os.path.join(PARENT_DIR, 'db', 'fpl.db'))
 HUB_URL = "https://www.fantasyfootballhub.co.uk/player-data/player-data.json"
 
+def init_db():
+    """Ensure the database directory exists and initialize the database connection."""
+    db_dir = os.path.dirname(DB_NAME)
+    if not os.path.exists(db_dir):
+        os.makedirs(db_dir)
+    conn = sqlite3.connect(DB_NAME)
+    create_tables(conn.cursor())
+    conn.commit()
+    return conn
+
 def create_tables(cursor):
-    cursor.execute("DROP TABLE IF EXISTS players")
-    cursor.execute("DROP TABLE IF EXISTS teams")
-    cursor.execute("DROP TABLE IF EXISTS player_history")
-    cursor.execute("DROP TABLE IF EXISTS predictions")
-    
     # Create the teams table
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS teams (
@@ -130,14 +135,16 @@ async def update_data():
     print(f"[{datetime.now()}] Fetched fixtures from FPL API")
 
     # Part 2: Connect to DB and insert FPL data
-    conn = sqlite3.connect(DB_NAME)
+    conn = init_db()
     cursor = conn.cursor()
     
     # 在更新前获取现有球员价格
-    cursor.execute("SELECT id, now_cost, web_name FROM players")
-    existing_players = {row[0]: {'cost': row[1], 'name': row[2]} for row in cursor.fetchall()}
-
-    create_tables(cursor)
+    try:
+        cursor.execute("SELECT players.id, players.now_cost AS cost, players.web_name, teams.name AS team_name FROM players join teams on players.team_id = teams.id")
+        existing_players = {row[0]: {'cost': row[1], 'name': row[2], 'team_name': row[3]} for row in cursor.fetchall()}
+    except sqlite3.OperationalError:
+        # players table might not exist on first run
+        existing_players = {}
 
     price_changes = []
 
@@ -145,12 +152,17 @@ async def update_data():
         cursor.execute("INSERT OR REPLACE INTO teams (id, name, short_name) VALUES (?, ?, ?)",
                        (team.id, team.name, team.short_name))
 
+    # Create team map from the database for consistency
+    cursor.execute("SELECT id, name FROM teams")
+    team_map = {row[0]: row[1] for row in cursor.fetchall()}
+
     for player in players:
         old_player_info = existing_players.get(player.id)
         if old_player_info and old_player_info['cost'] != player.now_cost:
             price_changes.append({
                 'player_id': player.id,
                 'web_name': player.web_name,
+                'team_name': old_player_info['team_name'],
                 'old_cost': old_player_info['cost'],
                 'new_cost': player.now_cost
             })
@@ -264,8 +276,8 @@ async def update_data():
     conn.close()
     
     # 如果有价格变动，则发送 webhook
-    # if price_changes:
-    #     send_price_change_webhook(price_changes)
+    if price_changes:
+        send_price_change_webhook(price_changes)
         
     print(f"[{datetime.now()}] Data has been successfully updated in {DB_NAME}")
 
@@ -281,13 +293,16 @@ def send_price_change_webhook(price_changes):
             {
                 "color": "#36a64f",
                 "pretext": f"{len(price_changes)} player(s) have price changes:",
-                "fields": [
+                "fields": 
                     {
-                        "title": f"{change['web_name']} ({change['player_id']})",
-                        "value": f"Old: {change['old_cost']/10:.1f}M, New: {change['new_cost']/10:.1f}M",
-                        "add": True if change['old_cost'] < change['new_cost'] else False
+                        "title": f"{change['web_name']}",
+                        "team": f"{change['team_name']}",
+                        "playid": f"{change['player_id']}",
+                        "old_value": f"{change['old_cost']/10:.1f}M",
+                        "new_value": f"{change['new_cost']/10:.1f}M",
+                        "add":  "升值" if change['old_cost'] < change['new_cost'] else "贬值"
                     } 
-                ],
+                ,
                 "footer": "FPL Price Change Notifier",
                 "ts": int(datetime.now().timestamp())
             }
