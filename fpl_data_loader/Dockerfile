@@ -1,9 +1,9 @@
-FROM python:3.9-slim
+FROM python:3.12-slim
 
 WORKDIR /app
 
 # 安装cron
-RUN sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list && apt-get update && apt-get -y install --no-install-recommends cron && rm -rf /var/lib/apt/lists/*
+RUN sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list.d/debian.sources && apt-get update && apt-get -y install --no-install-recommends cron && rm -rf /var/lib/apt/lists/*
 
 # 创建数据目录
 RUN mkdir -p /app/data
