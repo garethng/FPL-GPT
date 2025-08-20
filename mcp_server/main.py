@@ -1,9 +1,9 @@
 import asyncio
-from typing import List, Optional, AsyncIterator, Dict
+from typing import List, Optional, AsyncIterator, Dict, Union
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
-from sqlalchemy import create_engine, Column, Integer, String, Float, ForeignKey, inspect, Boolean
+from sqlalchemy import create_engine, Column, Integer, String, Float, ForeignKey, inspect, Boolean, distinct, func
 from sqlalchemy.orm import sessionmaker, Session, relationship, declarative_base
 from pydantic import BaseModel, ConfigDict
 from dotenv import load_dotenv
@@ -151,6 +151,17 @@ class PlayerBase(FPLBaseModel):
     team_id: int
     now_cost: int
     total_points: int
+    element_type: int
+    
+    @property
+    def cost(self) -> float:
+        """返回球员身价（以百万为单位）"""
+        return self.now_cost / 10.0
+    
+    @property
+    def position(self) -> str:
+        """返回球员位置（GK, DEF, MID, FWD）"""
+        return get_player_position(self.element_type)
 
 class TeamBase(FPLBaseModel):
     id: int
@@ -177,6 +188,13 @@ class MyTeam(BaseModel):
     used_budget: float
     total_points: int
     overall_rank: int
+    
+class FixtureInfo(FPLBaseModel):
+    gameweek: int
+    team_name: str
+    opponent_name: str
+    is_home: bool
+    difficulty: int
 
 # --- Lifespan and Context Management ---
 @dataclass
@@ -234,7 +252,7 @@ async def list_teams(ctx: T_AppContext) -> List[TeamBase]:
     return [TeamBase.model_validate(t) for t in teams]
 
 @app.tool()
-async def get_team(ctx: T_AppContext, team_id: int) -> TeamBase | Content:
+async def get_team(ctx: T_AppContext, team_id: int) -> Union[TeamBase, Content]:
     """Gets a specific team by its ID."""
     db = ctx.request_context.lifespan_context.db
     team = db.query(Team).filter(Team.id == team_id).first()
@@ -243,19 +261,32 @@ async def get_team(ctx: T_AppContext, team_id: int) -> TeamBase | Content:
     return TeamBase.model_validate(team)
 
 @app.tool()
-async def list_players(ctx: T_AppContext, name: Optional[str] = None) -> List[PlayerBase]:
+async def list_players(ctx: T_AppContext, name: Optional[str] = None, min_cost: Optional[float] = None, max_cost: Optional[float] = None) -> List[PlayerBase]:
     """
     Lists players. If a name is provided, it filters players whose web_name contains the name.
+    If min_cost or max_cost is provided, it filters players by their cost (in millions).
     """
     db = ctx.request_context.lifespan_context.db
     query = db.query(Player)
+    
+    # 按名称筛选
     if name:
         query = query.filter(Player.web_name.contains(name))
+    
+    # 按身价范围筛选（将输入的百万为单位转换为数据库中的整数单位）
+    if min_cost is not None:
+        min_cost_db = int(min_cost * 10)  # 转换为数据库存储单位
+        query = query.filter(Player.now_cost >= min_cost_db)
+    
+    if max_cost is not None:
+        max_cost_db = int(max_cost * 10)  # 转换为数据库存储单位
+        query = query.filter(Player.now_cost <= max_cost_db)
+    
     players = query.all()
     return [PlayerBase.model_validate(p) for p in players]
 
 @app.tool()
-async def get_player(ctx: T_AppContext, player_id: int) -> PlayerBase | Content:
+async def get_player(ctx: T_AppContext, player_id: int) -> Union[PlayerBase, Content]:
     """Gets a specific player by their ID."""
     db = ctx.request_context.lifespan_context.db
     player = db.query(Player).filter(Player.id == player_id).first()
@@ -264,7 +295,7 @@ async def get_player(ctx: T_AppContext, player_id: int) -> PlayerBase | Content:
     return PlayerBase.model_validate(player)
 
 @app.tool()
-async def get_player_predictions(ctx: T_AppContext, player_id: int) -> List[PredictionBase] | Content:
+async def get_player_predictions(ctx: T_AppContext, player_id: int) -> Union[List[PredictionBase], Content]:
     """Gets future gameweek predictions for a specific player."""
     db = ctx.request_context.lifespan_context.db
     
@@ -290,7 +321,7 @@ async def get_player_predictions(ctx: T_AppContext, player_id: int) -> List[Pred
 
 
 @app.tool()
-async def get_player_history(ctx: T_AppContext, player_id: int) -> List[PlayerHistoryBase] | Content:
+async def get_player_history(ctx: T_AppContext, player_id: int) -> Union[List[PlayerHistoryBase], Content]:
     """Gets the past gameweek performance history for a specific player."""
     db = ctx.request_context.lifespan_context.db
     
@@ -318,7 +349,77 @@ async def get_player_history(ctx: T_AppContext, player_id: int) -> List[PlayerHi
 
 
 @app.tool()
-async def get_my_team(ctx: T_AppContext) -> MyTeam | Content:
+async def get_fixtures(ctx: T_AppContext, team_id: Optional[int] = None, gameweeks: Optional[int] = 5) -> Union[List[FixtureInfo], Content]:
+    """
+    获取未来的对阵信息和对阵难度。
+    
+    参数:
+    - team_id: 可选，特定球队的ID。如果提供，则只返回该球队的对阵。
+    - gameweeks: 可选，要查询的未来轮次数量，默认为5轮。
+    
+    返回:
+    - 未来对阵信息列表，包括轮次、主队、客队、是否主场和难度系数。
+    """
+    db = ctx.request_context.lifespan_context.db
+    
+    try:
+        # 从预测表中获取当前轮次
+        current_gw = db.query(func.min(Prediction.gw)).scalar()
+        if not current_gw:
+            return Content(text="无法确定当前轮次。")
+        
+        # 计算要查询的轮次范围
+        max_gw = current_gw + gameweeks - 1
+        
+        # 创建球队ID到名称的映射
+        team_map = {t.id: t.name for t in db.query(Team).all()}
+        
+        # 构建基础查询 - 获取每个轮次中每个球队的一个预测记录
+        base_query = db.query(
+            Prediction.gw,
+            Player.team_id,
+            Prediction.opponent_team_id,
+            Prediction.is_home,
+            Prediction.difficulty
+        ).join(
+            Player, Prediction.player_id == Player.id
+        ).filter(
+            Prediction.gw.between(current_gw, max_gw)
+        )
+        
+        # 如果指定了球队ID，则只查询该球队的对阵
+        if team_id:
+            base_query = base_query.filter(Player.team_id == team_id)
+        
+        # 使用group_by来确保每个球队和轮次组合只有一条记录
+        fixtures_data = base_query.group_by(Player.team_id, Prediction.gw).all()
+        
+        # 构建结果
+        result = []
+        for gw, team_id, opponent_id, is_home, difficulty in fixtures_data:
+            team_name = team_map.get(team_id, "未知")
+            opponent_name = team_map.get(opponent_id, "未知")
+            
+            result.append(
+                FixtureInfo(
+                    gameweek=gw,
+                    team_name=team_name,
+                    opponent_name=opponent_name,
+                    is_home=is_home,
+                    difficulty=difficulty
+                )
+            )
+        
+        # 按轮次和球队名称排序
+        result.sort(key=lambda x: (x.gameweek, x.team_name))
+        
+        return result
+    except Exception as e:
+        return Content(text=f"获取对阵信息时发生错误: {e}")
+
+
+@app.tool()
+async def get_my_team(ctx: T_AppContext) -> Union[MyTeam, Content]:
     """
     Retrieves the logged-in user's team for the current gameweek,
     including available chips, free transfers, total points and overall rank.
@@ -386,6 +487,36 @@ async def get_my_team(ctx: T_AppContext) -> MyTeam | Content:
         )
     except Exception as e:
         return Content(text=f"An error occurred: {e}")
+
+@app.tool()
+async def get_team_fixtures(ctx: T_AppContext, team_name: str, gameweeks: Optional[int] = 5) -> Union[List[FixtureInfo], Content]:
+    """
+    根据球队名称获取特定球队的未来对阵信息。
+    
+    参数:
+    - team_name: 球队名称（可以是部分名称，将进行模糊匹配）
+    - gameweeks: 可选，要查询的未来轮次数量，默认为5轮。
+    
+    返回:
+    - 该球队的未来对阵信息列表，包括轮次、对手、是否主场和难度系数。
+    """
+    db = ctx.request_context.lifespan_context.db
+    
+    try:
+        # 查找匹配的球队
+        team = db.query(Team).filter(Team.name.contains(team_name)).first()
+        if not team:
+            return Content(text=f"未找到名称包含 '{team_name}' 的球队。")
+        
+        # 使用get_fixtures函数获取该球队的对阵信息
+        fixtures = await get_fixtures(ctx, team.id, gameweeks)
+        if isinstance(fixtures, Content):
+            return fixtures
+            
+        # 只返回该球队的对阵信息
+        return fixtures
+    except Exception as e:
+        return Content(text=f"获取球队对阵信息时发生错误: {e}")
 
 # To run this server for development, run the following command from the project root:
 # mcp dev mcp_server/main.py
