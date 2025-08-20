@@ -12,8 +12,9 @@ COPY ./mcp_server/__init__.py .
 COPY ./fpl ./fpl
 
 # 安装依赖
-RUN pip config set global.index-url http://mirrors.aliyun.com/pypi/simple/
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple --trusted-host pypi.tuna.tsinghua.edu.cn
+RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/
+RUN pip config set global.trusted-host pypi.aliyun.com
 RUN pip install mcp
 RUN pip install ./fpl
 # 创建.env文件的挂载点
