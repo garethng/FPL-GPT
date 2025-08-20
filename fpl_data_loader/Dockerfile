@@ -21,6 +21,8 @@ RUN pip install ./fpl
 
 # 创建.env文件的挂载点
 RUN touch .env
+RUN echo "FPL_EMAIL=$FPL_EMAIL" > .env
+RUN echo "FPL_PASSWORD=$FPL_PASSWORD" >> .env
 
 # 设置cron任务 - 每天凌晨3点执行
 RUN echo "0 3 * * * cd /app && DB_PATH=\${DB_PATH:-/app/data/fpl.db} python main.py >> /var/log/cron.log 2>&1" > /etc/cron.d/fpl-cron

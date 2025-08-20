@@ -221,7 +221,7 @@ def get_player_position(element_type: int) -> str:
 
 
 # --- MCP Server and Tool Definitions ---
-app = FastMCP(lifespan=app_lifespan)
+app = FastMCP(lifespan=app_lifespan, host="0.0.0.0", port=8000)
 T_AppContext = Context[ServerSession, AppContext]
 
 @app.tool()
