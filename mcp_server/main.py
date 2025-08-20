@@ -13,7 +13,9 @@ from mcp.server.session import ServerSession
 from mcp.types import Content
 
 from fpl import FPL
+from logpilot.log import Log
 
+logger = Log.get_logger("fpl-mcp-server")
 load_dotenv()
 
 # --- Database Setup (largely unchanged) ---
@@ -23,7 +25,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 default_db_path = os.path.join(parent_dir, 'db/fpl.db')
 DATABASE_URL = os.environ.get('DB_PATH', f"sqlite:///{default_db_path}")
-
+logger.info(f"DATABASE_URL: {DATABASE_URL}")
 # Ensure the database directory exists
 db_dir = os.path.dirname(default_db_path)
 if DATABASE_URL.startswith("sqlite"):
