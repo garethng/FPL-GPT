@@ -22,7 +22,7 @@ import os
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 default_db_path = os.path.join(parent_dir, 'db/fpl.db')
-DATABASE_URL = os.environ.get('DATABASE_URL', f"sqlite:///{default_db_path}")
+DATABASE_URL = os.environ.get('DB_PATH', f"sqlite:///{default_db_path}")
 
 # Ensure the database directory exists
 db_dir = os.path.dirname(default_db_path)

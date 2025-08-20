@@ -30,7 +30,7 @@ COPY <<EOF /app/entrypoint.sh
 mkdir -p /app/data
 
 # 修改数据库路径环境变量
-export DATABASE_URL="sqlite:///\${DB_PATH:-/app/data/fpl.db}"
+export DB_PATH="sqlite:///\${DB_PATH:-/app/data/fpl.db}"
 
 # 启动MCP服务器
 exec python main.py
