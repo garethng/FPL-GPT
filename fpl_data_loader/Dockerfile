@@ -24,8 +24,8 @@ RUN touch .env
 RUN echo "FPL_EMAIL=$FPL_EMAIL" > .env
 RUN echo "FPL_PASSWORD=$FPL_PASSWORD" >> .env
 
-# 设置cron任务 - 每天凌晨3点执行
-RUN echo "0 3 * * * cd /app && DB_PATH=\${DB_PATH:-/app/data/fpl.db} python main.py >> /var/log/cron.log 2>&1" > /etc/cron.d/fpl-cron
+# 设置cron任务 - 每天上午9点执行
+RUN echo "0 9 * * * cd /app && DB_PATH=\${DB_PATH:-/app/data/fpl.db} python main.py >> /var/log/cron.log 2>&1" > /etc/cron.d/fpl-cron
 RUN chmod 0644 /etc/cron.d/fpl-cron
 RUN crontab /etc/cron.d/fpl-cron
 
@@ -41,11 +41,8 @@ mkdir -p /app/data
 # 启动时先执行一次数据更新
 DB_PATH=\${DB_PATH:-/app/data/fpl.db} python /app/main.py
 
-# 启动cron服务并保持容器运行
-cron
-
-# 输出日志到标准输出以便查看
-tail -f /var/log/cron.log
+# 启动cron服务并保持容器运行（前台模式）
+cron -f
 EOF
 
 RUN chmod +x /app/entrypoint.sh
