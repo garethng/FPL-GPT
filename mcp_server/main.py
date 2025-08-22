@@ -74,6 +74,10 @@ class Player(Base):
     threat = Column(Float)
     ict_index = Column(Float)
     event_points = Column(Integer)
+    chance_of_playing_next_round = Column(Integer)
+    chance_of_playing_this_round = Column(Integer)
+    status = Column(String)
+    news = Column(String)
     team = relationship("Team", back_populates="players")
     predictions = relationship("Prediction", back_populates="player")
     history = relationship("PlayerHistory", back_populates="player")
@@ -152,6 +156,10 @@ class PlayerBase(FPLBaseModel):
     now_cost: int
     total_points: int
     element_type: int
+    chance_of_playing_next_round: Optional[int] = None
+    chance_of_playing_this_round: Optional[int] = None
+    status: Optional[str] = None
+    news: Optional[str] = None
     
     @property
     def cost(self) -> float:
@@ -162,6 +170,14 @@ class PlayerBase(FPLBaseModel):
     def position(self) -> str:
         """返回球员位置（GK, DEF, MID, FWD）"""
         return get_player_position(self.element_type)
+        
+    @property
+    def available(self) -> bool:
+        """返回球员是否可用"""
+        # 如果chance_of_playing_next_round为None或100，则认为球员可用
+        if self.chance_of_playing_next_round is None:
+            return True
+        return self.chance_of_playing_next_round == 100
 
 class TeamBase(FPLBaseModel):
     id: int
@@ -261,10 +277,11 @@ async def get_team(ctx: T_AppContext, team_id: int) -> Union[TeamBase, Content]:
     return TeamBase.model_validate(team)
 
 @app.tool()
-async def list_players(ctx: T_AppContext, name: Optional[str] = None, min_cost: Optional[float] = None, max_cost: Optional[float] = None) -> List[PlayerBase]:
+async def list_players(ctx: T_AppContext, name: Optional[str] = None, min_cost: Optional[float] = None, max_cost: Optional[float] = None, available: Optional[bool] = None) -> List[PlayerBase]:
     """
     Lists players. If a name is provided, it filters players whose web_name contains the name.
     If min_cost or max_cost is provided, it filters players by their cost (in millions).
+    If available is provided, it filters players by their availability status.
     """
     db = ctx.request_context.lifespan_context.db
     query = db.query(Player)
@@ -281,6 +298,15 @@ async def list_players(ctx: T_AppContext, name: Optional[str] = None, min_cost: 
     if max_cost is not None:
         max_cost_db = int(max_cost * 10)  # 转换为数据库存储单位
         query = query.filter(Player.now_cost <= max_cost_db)
+    
+    # 按可用状态筛选
+    if available is not None:
+        if available:
+            # 如果筛选可用球员，则选择chance_of_playing_next_round为100或为NULL的球员
+            query = query.filter((Player.chance_of_playing_next_round == 100) | (Player.chance_of_playing_next_round.is_(None)))
+        else:
+            # 如果筛选不可用球员，则选择chance_of_playing_next_round不为100且不为NULL的球员
+            query = query.filter((Player.chance_of_playing_next_round != 100) & (Player.chance_of_playing_next_round.isnot(None)))
     
     players = query.all()
     return [PlayerBase.model_validate(p) for p in players]

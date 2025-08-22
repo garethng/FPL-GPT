@@ -66,9 +66,32 @@ def create_tables(cursor):
         threat REAL,
         ict_index REAL,
         event_points INTEGER,
+        chance_of_playing_next_round INTEGER,
+        chance_of_playing_this_round INTEGER,
+        status TEXT,
+        news TEXT,
         FOREIGN KEY (team_id) REFERENCES teams (id)
     )
     ''')
+    
+    # 检查并添加缺失的列
+    try:
+        # 检查players表是否存在chance_of_playing_next_round列
+        cursor.execute("PRAGMA table_info(players)")
+        columns = [column[1] for column in cursor.fetchall()]
+        
+        # 添加缺失的列
+        if 'chance_of_playing_next_round' not in columns:
+            cursor.execute("ALTER TABLE players ADD COLUMN chance_of_playing_next_round INTEGER")
+        if 'chance_of_playing_this_round' not in columns:
+            cursor.execute("ALTER TABLE players ADD COLUMN chance_of_playing_this_round INTEGER")
+        if 'status' not in columns:
+            cursor.execute("ALTER TABLE players ADD COLUMN status TEXT")
+        if 'news' not in columns:
+            cursor.execute("ALTER TABLE players ADD COLUMN news TEXT")
+    except Exception as e:
+        print(f"检查或添加列时出错: {e}")
+        # 如果出错，可能是表不存在，这种情况下不需要处理，因为表会在上面的代码中创建
 
     # Create the player history table
     cursor.execute('''
@@ -167,22 +190,55 @@ async def update_data():
                 'new_cost': player.now_cost
             })
 
-        player_data = (
+        # 获取表中实际存在的列
+        cursor.execute("PRAGMA table_info(players)")
+        columns = [column[1] for column in cursor.fetchall()]
+        
+        # 准备基础数据（必须存在的列）
+        base_data = [
             player.id, player.web_name, player.first_name, player.second_name, player.team, player.team_code,
             player.element_type, player.now_cost, player.total_points, player.minutes, player.goals_scored, player.assists,
             player.clean_sheets, player.goals_conceded, player.own_goals, player.penalties_saved,
             player.penalties_missed, player.yellow_cards, player.red_cards, player.saves, player.bonus, player.bps,
             float(player.influence), float(player.creativity), float(player.threat), float(player.ict_index),
             player.event_points
-        )
-        cursor.execute('''
-            INSERT OR REPLACE INTO players (
-                id, web_name, first_name, second_name, team_id, team_code, element_type, now_cost, total_points, minutes,
-                goals_scored, assists, clean_sheets, goals_conceded, own_goals, penalties_saved,
-                penalties_missed, yellow_cards, red_cards, saves, bonus, bps, influence, creativity,
-                threat, ict_index, event_points
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', player_data)
+        ]
+        
+        # 准备SQL语句的列名部分
+        columns_sql = "id, web_name, first_name, second_name, team_id, team_code, element_type, now_cost, total_points, minutes, "
+        columns_sql += "goals_scored, assists, clean_sheets, goals_conceded, own_goals, penalties_saved, "
+        columns_sql += "penalties_missed, yellow_cards, red_cards, saves, bonus, bps, influence, creativity, "
+        columns_sql += "threat, ict_index, event_points"
+        
+        # 准备SQL语句的值占位符部分
+        values_sql = "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?"
+        
+        # 如果存在新列，添加到SQL和数据中
+        if 'chance_of_playing_next_round' in columns:
+            columns_sql += ", chance_of_playing_next_round"
+            values_sql += ", ?"
+            base_data.append(getattr(player, 'chance_of_playing_next_round', None))
+            
+        if 'chance_of_playing_this_round' in columns:
+            columns_sql += ", chance_of_playing_this_round"
+            values_sql += ", ?"
+            base_data.append(getattr(player, 'chance_of_playing_this_round', None))
+            
+        if 'status' in columns:
+            columns_sql += ", status"
+            values_sql += ", ?"
+            base_data.append(getattr(player, 'status', None))
+            
+        if 'news' in columns:
+            columns_sql += ", news"
+            values_sql += ", ?"
+            base_data.append(getattr(player, 'news', None))
+        
+        # 构建完整的SQL语句
+        sql = f"INSERT OR REPLACE INTO players ({columns_sql}) VALUES ({values_sql})"
+        
+        # 执行SQL
+        cursor.execute(sql, base_data)
 
         for history_item in player.history:
             history_data = (
