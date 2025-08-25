@@ -3,3 +3,9 @@ analysis/
 *.db
 __pycache__/
 /db
+.env
+*.claude
+*/claude/
+*.mcp.json
+FPLTeam.md
+claude.md

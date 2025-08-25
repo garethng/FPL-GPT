@@ -1,263 +1,155 @@
 import aiohttp
 import asyncio
-import sqlite3
 from datetime import datetime
 import os
 import argparse
 from fpl import FPL
 import dotenv
 import requests
+from supabase import create_client, Client
+from logpilot.log import Log
+
+logger = Log.get_logger("fpl-data-loader")
 
 dotenv.load_dotenv()
 
-# 获取数据库路径，优先使用环境变量
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PARENT_DIR = os.path.dirname(SCRIPT_DIR)
-DB_NAME = os.environ.get('DB_PATH', os.path.join(PARENT_DIR, 'db', 'fpl.db'))
+# 获取数据库连接，优先使用Supabase URL
 HUB_URL = "https://www.fantasyfootballhub.co.uk/player-data/player-data.json"
 
-def init_db():
-    """Ensure the database directory exists and initialize the database connection."""
-    db_dir = os.path.dirname(DB_NAME)
-    if not os.path.exists(db_dir):
-        os.makedirs(db_dir)
-    conn = sqlite3.connect(DB_NAME)
-    create_tables(conn.cursor())
-    conn.commit()
-    return conn
-
-def create_tables(cursor):
-    # Create the teams table
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS teams (
-        id INTEGER PRIMARY KEY,
-        name TEXT,
-        short_name TEXT
-    )
-    ''')
-
-    # Create the players table
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS players (
-        id INTEGER PRIMARY KEY,
-        web_name TEXT,
-        first_name TEXT,
-        second_name TEXT,
-        team_id INTEGER,
-        team_code INTEGER,
-        element_type INTEGER,  -- Position: 1: GK, 2: DEF, 3: MID, 4: FWD
-        now_cost INTEGER,
-        total_points INTEGER,
-        minutes INTEGER,
-        goals_scored INTEGER,
-        assists INTEGER,
-        clean_sheets INTEGER,
-        goals_conceded INTEGER,
-        own_goals INTEGER,
-        penalties_saved INTEGER,
-        penalties_missed INTEGER,
-        yellow_cards INTEGER,
-        red_cards INTEGER,
-        saves INTEGER,
-        bonus INTEGER,
-        bps INTEGER,
-        influence REAL,
-        creativity REAL,
-        threat REAL,
-        ict_index REAL,
-        event_points INTEGER,
-        chance_of_playing_next_round INTEGER,
-        chance_of_playing_this_round INTEGER,
-        status TEXT,
-        news TEXT,
-        FOREIGN KEY (team_id) REFERENCES teams (id)
-    )
-    ''')
+def get_supabase_client():
+    """Get Supabase client"""
+    supabase_url = os.environ.get('SUPABASE_URL')
+    supabase_key = os.environ.get('SUPABASE_KEY')
     
-    # 检查并添加缺失的列
-    try:
-        # 检查players表是否存在chance_of_playing_next_round列
-        cursor.execute("PRAGMA table_info(players)")
-        columns = [column[1] for column in cursor.fetchall()]
-        
-        # 添加缺失的列
-        if 'chance_of_playing_next_round' not in columns:
-            cursor.execute("ALTER TABLE players ADD COLUMN chance_of_playing_next_round INTEGER")
-        if 'chance_of_playing_this_round' not in columns:
-            cursor.execute("ALTER TABLE players ADD COLUMN chance_of_playing_this_round INTEGER")
-        if 'status' not in columns:
-            cursor.execute("ALTER TABLE players ADD COLUMN status TEXT")
-        if 'news' not in columns:
-            cursor.execute("ALTER TABLE players ADD COLUMN news TEXT")
-    except Exception as e:
-        print(f"检查或添加列时出错: {e}")
-        # 如果出错，可能是表不存在，这种情况下不需要处理，因为表会在上面的代码中创建
+    if not supabase_url or not supabase_key:
+        raise ValueError("Supabase credentials (SUPABASE_URL and SUPABASE_KEY) are required")
+    
+    return create_client(supabase_url, supabase_key)
 
-    # Create the player history table
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS player_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        player_id INTEGER,
-        fixture_id INTEGER,
-        opponent_team_id INTEGER,
-        total_points INTEGER,
-        was_home BOOLEAN,
-        kickoff_time TEXT,
-        round INTEGER,
-        minutes INTEGER,
-        goals_scored INTEGER,
-        assists INTEGER,
-        clean_sheets INTEGER,
-        goals_conceded INTEGER,
-        own_goals INTEGER,
-        penalties_saved INTEGER,
-        penalties_missed INTEGER,
-        yellow_cards INTEGER,
-        red_cards INTEGER,
-        saves INTEGER,
-        bonus INTEGER,
-        bps INTEGER,
-        influence REAL,
-        creativity REAL,
-        threat REAL,
-        ict_index REAL,
-        FOREIGN KEY (player_id) REFERENCES players (id),
-        FOREIGN KEY (opponent_team_id) REFERENCES teams (id)
-    )
-    ''')
-
-    # Create the predictions table
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS predictions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        player_id INTEGER,
-        gw INTEGER,
-        predicted_pts REAL,
-        opponent_team_id INTEGER,
-        is_home BOOLEAN,
-        difficulty INTEGER,
-        FOREIGN KEY (player_id) REFERENCES players (id),
-        FOREIGN KEY (opponent_team_id) REFERENCES teams (id)
-    )
-    ''')
 
 async def update_data():
     # Part 1: Fetch data from official FPL API
-    print(f"[{datetime.now()}] Fetching data from FPL API...")
+    logger.info(f"[{datetime.now()}] Fetching data from FPL API...")
     fpl = FPL()
-    await fpl.login_v2(os.getenv("FPL_EMAIL"), os.getenv("FPL_PASSWORD"))
-    print(f"[{datetime.now()}] Logged in to FPL API")
-    
+    # await fpl.login_v2(os.getenv("FPL_EMAIL"), os.getenv("FPL_PASSWORD"))
+    fpl.access_token = None
+    fpl.session = requests.Session()
+    logger.info(f"[{datetime.now()}] Logged in to FPL API")
     players = await fpl.get_players(include_summary=True)
-    print(f"[{datetime.now()}] Fetched players from FPL API")
+    logger.info(f"[{datetime.now()}] Fetched players from FPL API")
     teams_data = await fpl.get_teams()
-    print(f"[{datetime.now()}] Fetched teams from FPL API")
+    logger.info(f"[{datetime.now()}] Fetched teams from FPL API")
     
     # 获取赛程信息
     fixtures = await fpl.get_fixtures()
-    print(f"[{datetime.now()}] Fetched fixtures from FPL API")
+    logger.info(f"[{datetime.now()}] Fetched fixtures from FPL API")
 
     # Part 2: Connect to DB and insert FPL data
-    conn = init_db()
-    cursor = conn.cursor()
+    supabase = get_supabase_client()
     
-    # 在更新前获取现有球员价格
-    try:
-        cursor.execute("SELECT players.id, players.now_cost AS cost, players.web_name, teams.name AS team_name FROM players join teams on players.team_id = teams.id")
-        existing_players = {row[0]: {'cost': row[1], 'name': row[2], 'team_name': row[3]} for row in cursor.fetchall()}
-    except sqlite3.OperationalError:
-        # players table might not exist on first run
-        existing_players = {}
-
+    logger.info(f"[{datetime.now()}] Using Supabase for data storage")
+    
+    # Upsert teams
+    teams_to_upsert = [{"team_id": team.id, "name": team.name, "short_name": team.short_name} for team in teams_data]
+    if teams_to_upsert:
+        supabase.table("teams").upsert(teams_to_upsert).execute()
+    
+    # Get existing players for price change detection
+    existing_players_result = supabase.table("players").select("player_id, now_cost, web_name, team_id").execute()
+    existing_players = {player['player_id']: player for player in existing_players_result.data}
+    
+    # Get team names for price change notifications
+    teams_result = supabase.table("teams").select("team_id, name").execute()
+    team_map = {team['team_id']: team['name'] for team in teams_result.data}
+    
     price_changes = []
-
-    for team in teams_data:
-        cursor.execute("INSERT OR REPLACE INTO teams (id, name, short_name) VALUES (?, ?, ?)",
-                       (team.id, team.name, team.short_name))
-
-    # Create team map from the database for consistency
-    cursor.execute("SELECT id, name FROM teams")
-    team_map = {row[0]: row[1] for row in cursor.fetchall()}
-
+    players_to_upsert = []
+    history_to_insert = []
+    
     for player in players:
         old_player_info = existing_players.get(player.id)
-        if old_player_info and old_player_info['cost'] != player.now_cost:
+        if old_player_info and old_player_info['now_cost'] != player.now_cost:
             price_changes.append({
                 'player_id': player.id,
                 'web_name': player.web_name,
-                'team_name': old_player_info['team_name'],
-                'old_cost': old_player_info['cost'],
+                'team_name': team_map.get(old_player_info['team_id'], 'Unknown'),
+                'old_cost': old_player_info['now_cost'],
                 'new_cost': player.now_cost
             })
 
-        # 获取表中实际存在的列
-        cursor.execute("PRAGMA table_info(players)")
-        columns = [column[1] for column in cursor.fetchall()]
-        
-        # 准备基础数据（必须存在的列）
-        base_data = [
-            player.id, player.web_name, player.first_name, player.second_name, player.team, player.team_code,
-            player.element_type, player.now_cost, player.total_points, player.minutes, player.goals_scored, player.assists,
-            player.clean_sheets, player.goals_conceded, player.own_goals, player.penalties_saved,
-            player.penalties_missed, player.yellow_cards, player.red_cards, player.saves, player.bonus, player.bps,
-            float(player.influence), float(player.creativity), float(player.threat), float(player.ict_index),
-            player.event_points
-        ]
-        
-        # 准备SQL语句的列名部分
-        columns_sql = "id, web_name, first_name, second_name, team_id, team_code, element_type, now_cost, total_points, minutes, "
-        columns_sql += "goals_scored, assists, clean_sheets, goals_conceded, own_goals, penalties_saved, "
-        columns_sql += "penalties_missed, yellow_cards, red_cards, saves, bonus, bps, influence, creativity, "
-        columns_sql += "threat, ict_index, event_points"
-        
-        # 准备SQL语句的值占位符部分
-        values_sql = "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?"
-        
-        # 如果存在新列，添加到SQL和数据中
-        if 'chance_of_playing_next_round' in columns:
-            columns_sql += ", chance_of_playing_next_round"
-            values_sql += ", ?"
-            base_data.append(getattr(player, 'chance_of_playing_next_round', None))
-            
-        if 'chance_of_playing_this_round' in columns:
-            columns_sql += ", chance_of_playing_this_round"
-            values_sql += ", ?"
-            base_data.append(getattr(player, 'chance_of_playing_this_round', None))
-            
-        if 'status' in columns:
-            columns_sql += ", status"
-            values_sql += ", ?"
-            base_data.append(getattr(player, 'status', None))
-            
-        if 'news' in columns:
-            columns_sql += ", news"
-            values_sql += ", ?"
-            base_data.append(getattr(player, 'news', None))
-        
-        # 构建完整的SQL语句
-        sql = f"INSERT OR REPLACE INTO players ({columns_sql}) VALUES ({values_sql})"
-        
-        # 执行SQL
-        cursor.execute(sql, base_data)
+        # Prepare player data
+        player_data = {
+            "player_id": player.id,
+            "web_name": player.web_name,
+            "first_name": player.first_name,
+            "second_name": player.second_name,
+            "team_id": player.team,
+            "team_code": player.team_code,
+            "element_type": player.element_type,
+            "now_cost": player.now_cost,
+            "total_points": player.total_points,
+            "minutes": player.minutes,
+            "goals_scored": player.goals_scored,
+            "assists": player.assists,
+            "clean_sheets": player.clean_sheets,
+            "goals_conceded": player.goals_conceded,
+            "own_goals": player.own_goals,
+            "penalties_saved": player.penalties_saved,
+            "penalties_missed": player.penalties_missed,
+            "yellow_cards": player.yellow_cards,
+            "red_cards": player.red_cards,
+            "saves": player.saves,
+            "bonus": player.bonus,
+            "bps": player.bps,
+            "influence": float(player.influence),
+            "creativity": float(player.creativity),
+            "threat": float(player.threat),
+            "ict_index": float(player.ict_index),
+            "event_points": player.event_points,
+            "chance_of_playing_next_round": getattr(player, 'chance_of_playing_next_round', None),
+            "chance_of_playing_this_round": getattr(player, 'chance_of_playing_this_round', None),
+            "status": getattr(player, 'status', None),
+            "news": getattr(player, 'news', None)
+        }
+        players_to_upsert.append(player_data)
 
+        # Prepare history data
         for history_item in player.history:
-            history_data = (
-                player.id, history_item['fixture'], history_item['opponent_team'], history_item['total_points'],
-                history_item['was_home'], history_item['kickoff_time'], history_item['round'], history_item['minutes'],
-                history_item['goals_scored'], history_item['assists'], history_item['clean_sheets'],
-                history_item['goals_conceded'], history_item['own_goals'], history_item['penalties_saved'],
-                history_item['penalties_missed'], history_item['yellow_cards'], history_item['red_cards'],
-                history_item['saves'], history_item['bonus'], history_item['bps'], history_item['influence'],
-                history_item['creativity'], history_item['threat'], history_item['ict_index']
-            )
-            cursor.execute('''
-                INSERT INTO player_history (
-                    player_id, fixture_id, opponent_team_id, total_points, was_home, kickoff_time, round,
-                    minutes, goals_scored, assists, clean_sheets, goals_conceded, own_goals, penalties_saved,
-                    penalties_missed, yellow_cards, red_cards, saves, bonus, bps, influence, creativity,
-                    threat, ict_index
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', history_data)
+            history_data = {
+                "player_id": player.id,
+                "fixture_id": history_item['fixture'],
+                "opponent_team_id": history_item['opponent_team'],
+                "total_points": history_item['total_points'],
+                "was_home": history_item['was_home'],
+                "kickoff_time": history_item['kickoff_time'],
+                "round": history_item['round'],
+                "minutes": history_item['minutes'],
+                "goals_scored": history_item['goals_scored'],
+                "assists": history_item['assists'],
+                "clean_sheets": history_item['clean_sheets'],
+                "goals_conceded": history_item['goals_conceded'],
+                "own_goals": history_item['own_goals'],
+                "penalties_saved": history_item['penalties_saved'],
+                "penalties_missed": history_item['penalties_missed'],
+                "yellow_cards": history_item['yellow_cards'],
+                "red_cards": history_item['red_cards'],
+                "saves": history_item['saves'],
+                "bonus": history_item['bonus'],
+                "bps": history_item['bps'],
+                "influence": history_item['influence'],
+                "creativity": history_item['creativity'],
+                "threat": history_item['threat'],
+                "ict_index": history_item['ict_index']
+            }
+            history_to_insert.append(history_data)
+
+    # Upsert players in batches
+    if players_to_upsert:
+        supabase.table("players").upsert(players_to_upsert).execute()
+    
+    # Insert history in batches
+    if history_to_insert:
+        supabase.table("player_history").upsert(history_to_insert, on_conflict="player_id,round").execute()
     
     # 创建轮次与赛程的映射
     fixtures_by_team_gw = {}
@@ -288,24 +180,24 @@ async def update_data():
         }
     
     # Part 3: Fetch and insert prediction data from Hub
-    print(f"[{datetime.now()}] Fetching prediction data from Fantasy Football Hub...")
+    logger.info(f"[{datetime.now()}] Fetching prediction data from Fantasy Football Hub...")
     try:
         response = requests.get(HUB_URL)
         response.raise_for_status()
         hub_players_data = response.json()
-        print(f"[{datetime.now()}] Fetched prediction data.")
+        logger.info(f"[{datetime.now()}] Fetched prediction data.")
 
+        predictions_to_insert = []
         for hub_player in hub_players_data:
             fpl_info = hub_player.get('fpl', {})
             player_id = fpl_info.get('id')
             if player_id:
                 # 获取球员所属球队ID
-                cursor.execute("SELECT team_id FROM players WHERE id = ?", (player_id,))
-                result = cursor.fetchone()
-                if not result:
+                player_result = supabase.table("players").select("team_id").eq("player_id", player_id).execute()
+                if not player_result.data:
                     continue
                 
-                team_id = result[0]
+                team_id = player_result.data[0]['team_id']
                 team_fixtures = fixtures_by_team_gw.get(team_id, {})
                 
                 predictions = hub_player.get('data', {}).get('predictions', [])
@@ -319,28 +211,36 @@ async def update_data():
                     is_home = fixture_info.get('is_home')
                     difficulty = fixture_info.get('difficulty')
                     
-                    # 插入预测数据，包括对阵和难度信息
-                    cursor.execute("""
-                        INSERT INTO predictions 
-                        (player_id, gw, predicted_pts, opponent_team_id, is_home, difficulty) 
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    """, (player_id, gw, predicted_pts, opponent_team_id, is_home, difficulty))
+                    # 准备预测数据
+                    prediction_data = {
+                        "player_id": player_id,
+                        "gw": gw,
+                        "predicted_pts": predicted_pts,
+                        "opponent_team_id": opponent_team_id,
+                        "is_home": is_home,
+                        "difficulty": difficulty
+                    }
+                    predictions_to_insert.append(prediction_data)
+        
+        # Insert predictions
+        if predictions_to_insert:
+            supabase.table("predictions").upsert(predictions_to_insert, on_conflict="player_id,gw").execute()
+            
     except requests.exceptions.RequestException as e:
-        print(f"Error fetching prediction data: {e}")
-
-    conn.commit()
-    conn.close()
+        logger.info(f"Error fetching prediction data: {e}")
+    
+    logger.info(f"[{datetime.now()}] Data has been successfully updated to Supabase")
     
     # 如果有价格变动，则发送 webhook
     if price_changes:
         send_price_change_webhook(price_changes)
         
-    print(f"[{datetime.now()}] Data has been successfully updated in {DB_NAME}")
+    logger.info(f"[{datetime.now()}] Data has been successfully updated")
 
 def send_price_change_webhook(price_changes):
     webhook_url = "https://www.feishu.cn/flow/api/trigger-webhook/66148a80728f8b9b94ca8274015bfa93"
     if not webhook_url:
-        print("PRICE_CHANGE_WEBHOOK_URL not set, skipping webhook.")
+        logger.info("PRICE_CHANGE_WEBHOOK_URL not set, skipping webhook.")
         return
 
     payloads = [{
@@ -369,58 +269,57 @@ def send_price_change_webhook(price_changes):
         try:
             response = requests.post(webhook_url, json=payload)
             response.raise_for_status()
-            print(f"[{datetime.now()}] Successfully sent price change webhook.")
+            logger.info(f"[{datetime.now()}] Successfully sent price change webhook.")
         except requests.exceptions.RequestException as e:
-            print(f"Error sending price change webhook: {e}")
+            logger.info(f"Error sending price change webhook: {e}")
 
 def query_player_by_name(name):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
+    supabase = get_supabase_client()
     
-    cursor.execute("SELECT * FROM players WHERE web_name LIKE ?", (f'%{name}%',))
-    players = cursor.fetchall()
+    # Use Supabase
+    players_result = supabase.table("players").select("*").ilike("web_name", f"%{name}%").execute()
+    players = players_result.data
     
     if not players:
-        print(f"No players found with the name: {name}")
+        logger.info(f"No players found with the name: {name}")
         return
 
-    player_column_names = [description[0] for description in cursor.description]
-
     for player in players:
-        print("-" * 40)
-        player_id = player[0]
-        for i, col_name in enumerate(player_column_names):
-            print(f"{col_name}: {player[i]}")
+        logger.info("-" * 40)
+        player_id = player['player_id']
+        for key, value in player.items():
+            logger.info(f"{key}: {value}")
 
-        cursor.execute("SELECT h.round, t.short_name, h.was_home, h.total_points FROM player_history h JOIN teams t ON h.opponent_team_id = t.id WHERE h.player_id = ? ORDER BY h.round", (player_id,))
-        history = cursor.fetchall()
-
+        # Get player history
+        history_result = supabase.table("player_history").select("round, opponent_team_id, was_home, total_points").eq("player_id", player_id).order("round").execute()
+        history = history_result.data
+        
         if history:
-            print("\nMatch History (Actual Points):")
-            print(f"{'Gameweek':<10} {'Opponent':<10} {'Venue':<10} {'Points':<10}")
-            for gw, opponent, was_home, points in history:
-                venue = "Home" if was_home else "Away"
-                print(f"{gw:<10} {opponent:<10} {venue:<10} {points:<10}")
+            logger.info("\nMatch History (Actual Points):")
+            logger.info(f"{'Gameweek':<10} {'Opponent':<10} {'Venue':<10} {'Points':<10}")
+            for item in history:
+                # Get opponent team name
+                team_result = supabase.table("teams").select("short_name").eq("team_id", item['opponent_team_id']).execute()
+                opponent = team_result.data[0]['short_name'] if team_result.data else "Unknown"
+                
+                venue = "Home" if item['was_home'] else "Away"
+                logger.info(f"{item['round']:<10} {opponent:<10} {venue:<10} {item['total_points']:<10}")
 
-        cursor.execute("""
-            SELECT p.gw, p.predicted_pts, t.short_name, p.is_home, p.difficulty 
-            FROM predictions p 
-            LEFT JOIN teams t ON p.opponent_team_id = t.id 
-            WHERE p.player_id = ? 
-            ORDER BY p.gw
-        """, (player_id,))
-        predictions = cursor.fetchall()
-
+        # Get predictions
+        predictions_result = supabase.table("predictions").select("gw, predicted_pts, opponent_team_id, is_home, difficulty").eq("player_id", player_id).order("gw").execute()
+        predictions = predictions_result.data
+        
         if predictions:
-            print("\nFuture Predictions (Predicted Points):")
-            print(f"{'Gameweek':<10} {'Opponent':<10} {'Venue':<10} {'Difficulty':<10} {'Predicted Points':<20}")
-            for gw, pts, opponent, is_home, difficulty in predictions:
-                venue = "Home" if is_home else "Away"
-                difficulty_str = str(difficulty) if difficulty is not None else "N/A"
-                opponent_str = opponent if opponent is not None else "N/A"
-                print(f"{gw:<10} {opponent_str:<10} {venue:<10} {difficulty_str:<10} {pts:.2f}")
-
-    conn.close()
+            logger.info("\nFuture Predictions (Predicted Points):")
+            logger.info(f"{'Gameweek':<10} {'Opponent':<10} {'Venue':<10} {'Difficulty':<10} {'Predicted Points':<20}")
+            for pred in predictions:
+                # Get opponent team name
+                team_result = supabase.table("teams").select("short_name").eq("team_id", pred['opponent_team_id']).execute()
+                opponent = team_result.data[0]['short_name'] if team_result.data else "N/A"
+                
+                venue = "Home" if pred['is_home'] else "Away"
+                difficulty_str = str(pred['difficulty']) if pred['difficulty'] is not None else "N/A"
+                logger.info(f"{pred['gw']:<10} {opponent:<10} {venue:<10} {difficulty_str:<10} {pred['predicted_pts']:.2f}")
 
 def main():
     parser = argparse.ArgumentParser(description="FPL Player Data Loader and Querier")

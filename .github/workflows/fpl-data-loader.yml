@@ -1,0 +1,37 @@
+name: FPL Data Loader Cron Job
+
+on:
+  schedule:
+    # Run every day at 9:30 UTC
+    - cron: '30 9 * * *'
+  # Allow manual triggering
+  workflow_dispatch:
+
+jobs:
+  update-fpl-data:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Install dependencies
+      run: |
+        pip install ./fpl
+        cd fpl_data_loader
+        pip install -r requirements.txt
+
+    - name: Run FPL Data Loader
+      env:
+        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        FPL_EMAIL: ${{ secrets.FPL_EMAIL }}
+        FPL_PASSWORD: ${{ secrets.FPL_PASSWORD }}
+      run: |
+        cd fpl_data_loader
+        python main.py

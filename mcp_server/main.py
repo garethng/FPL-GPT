@@ -3,10 +3,9 @@ from typing import List, Optional, AsyncIterator, Dict, Union
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
-from sqlalchemy import create_engine, Column, Integer, String, Float, ForeignKey, inspect, Boolean, distinct, func
-from sqlalchemy.orm import sessionmaker, Session, relationship, declarative_base
 from pydantic import BaseModel, ConfigDict
 from dotenv import load_dotenv
+from supabase import create_client
 
 from mcp.server.fastmcp import FastMCP, Context
 from mcp.server.session import ServerSession
@@ -18,111 +17,21 @@ from logpilot.log import Log
 logger = Log.get_logger("fpl-mcp-server")
 load_dotenv()
 
-# --- Database Setup (largely unchanged) ---
+# --- Database Setup ---
 import os
-# 优先使用环境变量中的数据库URL，如果没有设置则使用默认路径
-current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.dirname(current_dir)
-default_db_path = os.path.join(parent_dir, 'db/fpl.db')
-DATABASE_URL = os.environ.get('DB_PATH', f"sqlite:///{default_db_path}")
-logger.info(f"DATABASE_URL: {DATABASE_URL}")
-# Ensure the database directory exists
-db_dir = os.path.dirname(default_db_path)
-if DATABASE_URL.startswith("sqlite"):
-    db_path = DATABASE_URL.split("sqlite:///")[-1]
-    db_dir = os.path.dirname(db_path)
-    if not os.path.exists(db_dir):
-        os.makedirs(db_dir)
 
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
+# Get Supabase credentials from environment
+SUPABASE_URL = os.environ.get('SUPABASE_URL')
+SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
 
-# --- SQLAlchemy Models (unchanged) ---
-class Team(Base):
-    __tablename__ = "teams"
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, unique=True, index=True)
-    players = relationship("Player", back_populates="team")
+# Check if Supabase credentials are available
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise ValueError("Supabase credentials (SUPABASE_URL and SUPABASE_KEY) are required and not found in environment variables")
 
-class Player(Base):
-    __tablename__ = "players"
-    id = Column(Integer, primary_key=True, index=True)
-    first_name = Column(String)
-    second_name = Column(String)
-    web_name = Column(String)
-    team_id = Column(Integer, ForeignKey("teams.id"))
-    team_code = Column(Integer)
-    element_type = Column(Integer)
-    now_cost = Column(Integer)
-    total_points = Column(Integer)
-    minutes = Column(Integer)
-    goals_scored = Column(Integer)
-    assists = Column(Integer)
-    clean_sheets = Column(Integer)
-    goals_conceded = Column(Integer)
-    own_goals = Column(Integer)
-    penalties_saved = Column(Integer)
-    penalties_missed = Column(Integer)
-    yellow_cards = Column(Integer)
-    red_cards = Column(Integer)
-    saves = Column(Integer)
-    bonus = Column(Integer)
-    bps = Column(Integer)
-    influence = Column(Float)
-    creativity = Column(Float)
-    threat = Column(Float)
-    ict_index = Column(Float)
-    event_points = Column(Integer)
-    chance_of_playing_next_round = Column(Integer)
-    chance_of_playing_this_round = Column(Integer)
-    status = Column(String)
-    news = Column(String)
-    team = relationship("Team", back_populates="players")
-    predictions = relationship("Prediction", back_populates="player")
-    history = relationship("PlayerHistory", back_populates="player")
+# Initialize Supabase client
+supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
+logger.info("Supabase client initialized successfully")
 
-class PlayerHistory(Base):
-    __tablename__ = "player_history"
-    id = Column(Integer, primary_key=True, index=True)
-    player_id = Column(Integer, ForeignKey("players.id"))
-    fixture_id = Column(Integer)
-    opponent_team_id = Column(Integer, ForeignKey("teams.id"))
-    total_points = Column(Integer)
-    was_home = Column(Boolean)
-    kickoff_time = Column(String)
-    round = Column(Integer)
-    minutes = Column(Integer)
-    goals_scored = Column(Integer)
-    assists = Column(Integer)
-    clean_sheets = Column(Integer)
-    goals_conceded = Column(Integer)
-    own_goals = Column(Integer)
-    penalties_saved = Column(Integer)
-    penalties_missed = Column(Integer)
-    yellow_cards = Column(Integer)
-    red_cards = Column(Integer)
-    saves = Column(Integer)
-    bonus = Column(Integer)
-    bps = Column(Integer)
-    influence = Column(Float)
-    creativity = Column(Float)
-    threat = Column(Float)
-    ict_index = Column(Float)
-    player = relationship("Player", back_populates="history")
-    opponent_team = relationship("Team")
-
-class Prediction(Base):
-    __tablename__ = "predictions"
-    id = Column(Integer, primary_key=True, index=True)
-    player_id = Column(Integer, ForeignKey("players.id"))
-    gw = Column(Integer)
-    predicted_pts = Column(Float)
-    opponent_team_id = Column(Integer, ForeignKey("teams.id"))
-    is_home = Column(Boolean)
-    difficulty = Column(Integer)
-    player = relationship("Player", back_populates="predictions")
-    opponent_team = relationship("Team")
 
 
 # --- Pydantic Models for tool outputs ---
@@ -130,13 +39,16 @@ class FPLBaseModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 class PredictionBase(FPLBaseModel):
+    player_id: int
     gw: int
     predicted_pts: float
     opponent_team: Optional[str] = None
     is_home: Optional[bool] = None
     difficulty: Optional[int] = None
 
+
 class PlayerHistoryBase(FPLBaseModel):
+    player_id: int
     round: int
     opponent_team: str
     was_home: bool
@@ -148,7 +60,7 @@ class PlayerHistoryBase(FPLBaseModel):
     bonus: int
 
 class PlayerBase(FPLBaseModel):
-    id: int
+    player_id: int
     first_name: str
     second_name: str
     web_name: str
@@ -180,7 +92,7 @@ class PlayerBase(FPLBaseModel):
         return self.chance_of_playing_next_round == 100
 
 class TeamBase(FPLBaseModel):
-    id: int
+    team_id: int
     name: str
 
 class MyTeamPlayer(BaseModel):
@@ -215,18 +127,16 @@ class FixtureInfo(FPLBaseModel):
 # --- Lifespan and Context Management ---
 @dataclass
 class AppContext:
-    """Application context to hold the database session."""
-    db: Session
+    """Application context to hold the Supabase client and FPL client."""
     fpl_client: FPL
+    supabase: any
 
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
-    """Manage the database session and FPL client lifecycle."""
-    # Create tables if they don't exist
-    Base.metadata.create_all(bind=engine)
-
-    db = SessionLocal()
+    """Manage the Supabase client and FPL client lifecycle."""
+    
     fpl_client = FPL()
+    
     email = os.getenv("FPL_EMAIL")
     password = os.getenv("FPL_PASSWORD")
     if email and password:
@@ -241,9 +151,10 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
         fpl_client = None
 
     try:
-        yield AppContext(db=db, fpl_client=fpl_client)
+        yield AppContext(fpl_client=fpl_client, supabase=supabase_client)
     finally:
-        db.close()
+        # No database connection to close
+        pass
 
 
 def get_player_position(element_type: int) -> str:
@@ -263,18 +174,20 @@ T_AppContext = Context[ServerSession, AppContext]
 @app.tool()
 async def list_teams(ctx: T_AppContext) -> List[TeamBase]:
     """Lists all teams in the Fantasy Premier League."""
-    db = ctx.request_context.lifespan_context.db
-    teams = db.query(Team).all()
-    return [TeamBase.model_validate(t) for t in teams]
+    supabase = ctx.request_context.lifespan_context.supabase
+    
+    result = supabase.table("teams").select("*").execute()
+    return [TeamBase.model_validate(t) for t in result.data]
 
 @app.tool()
 async def get_team(ctx: T_AppContext, team_id: int) -> Union[TeamBase, Content]:
     """Gets a specific team by its ID."""
-    db = ctx.request_context.lifespan_context.db
-    team = db.query(Team).filter(Team.id == team_id).first()
-    if not team:
+    supabase = ctx.request_context.lifespan_context.supabase
+    
+    result = supabase.table("teams").select("*").eq("team_id", team_id).execute()
+    if not result.data:
         return Content(text=f"Team with id {team_id} not found")
-    return TeamBase.model_validate(team)
+    return TeamBase.model_validate(result.data[0])
 
 @app.tool()
 async def list_players(ctx: T_AppContext, name: Optional[str] = None, min_cost: Optional[float] = None, max_cost: Optional[float] = None, available: Optional[bool] = None) -> List[PlayerBase]:
@@ -283,95 +196,113 @@ async def list_players(ctx: T_AppContext, name: Optional[str] = None, min_cost: 
     If min_cost or max_cost is provided, it filters players by their cost (in millions).
     If available is provided, it filters players by their availability status.
     """
-    db = ctx.request_context.lifespan_context.db
-    query = db.query(Player)
+    supabase = ctx.request_context.lifespan_context.supabase
+    
+    query = supabase.table("players").select("*")
     
     # 按名称筛选
     if name:
-        query = query.filter(Player.web_name.contains(name))
+        # add or for name
+        query = query.or_(f"web_name.ilike.{name},first_name.ilike.{name},second_name.ilike.{name}")
     
-    # 按身价范围筛选（将输入的百万为单位转换为数据库中的整数单位）
+    # 按身价范围筛选
     if min_cost is not None:
         min_cost_db = int(min_cost * 10)  # 转换为数据库存储单位
-        query = query.filter(Player.now_cost >= min_cost_db)
+        query = query.gte("now_cost", min_cost_db)
     
     if max_cost is not None:
         max_cost_db = int(max_cost * 10)  # 转换为数据库存储单位
-        query = query.filter(Player.now_cost <= max_cost_db)
+        query = query.lte("now_cost", max_cost_db)
     
     # 按可用状态筛选
     if available is not None:
         if available:
             # 如果筛选可用球员，则选择chance_of_playing_next_round为100或为NULL的球员
-            query = query.filter((Player.chance_of_playing_next_round == 100) | (Player.chance_of_playing_next_round.is_(None)))
+            query = query.or_(f"chance_of_playing_next_round.eq.100,chance_of_playing_next_round.is.null")
         else:
             # 如果筛选不可用球员，则选择chance_of_playing_next_round不为100且不为NULL的球员
-            query = query.filter((Player.chance_of_playing_next_round != 100) & (Player.chance_of_playing_next_round.isnot(None)))
+            query = query.neq("chance_of_playing_next_round", 100).not_.is_("chance_of_playing_next_round", "null")
     
-    players = query.all()
-    return [PlayerBase.model_validate(p) for p in players]
+    result = query.execute()
+    return [PlayerBase.model_validate(p) for p in result.data]
 
 @app.tool()
 async def get_player(ctx: T_AppContext, player_id: int) -> Union[PlayerBase, Content]:
     """Gets a specific player by their ID."""
-    db = ctx.request_context.lifespan_context.db
-    player = db.query(Player).filter(Player.id == player_id).first()
-    if not player:
+    supabase = ctx.request_context.lifespan_context.supabase
+    
+    result = supabase.table("players").select("*").eq("player_id", player_id).execute()
+    if not result.data:
         return Content(text=f"Player with id {player_id} not found")
-    return PlayerBase.model_validate(player)
+    return PlayerBase.model_validate(result.data[0])
 
 @app.tool()
-async def get_player_predictions(ctx: T_AppContext, player_id: int) -> Union[List[PredictionBase], Content]:
-    """Gets future gameweek predictions for a specific player."""
-    db = ctx.request_context.lifespan_context.db
+async def get_player_predictions(ctx: T_AppContext, player_id: int, gameweek: Optional[int] = None) -> Union[List[PredictionBase], Content]:
+    """Gets future gameweek predictions for a specific player. If gameweek is provided, returns only that gameweek's prediction."""
+    supabase = ctx.request_context.lifespan_context.supabase
     
-    # 获取球员预测，并直接使用数据库中的对阵信息
-    predictions = db.query(Prediction).filter(Prediction.player_id == player_id).order_by(Prediction.gw).all()
-    if not predictions:
-        return Content(text=f"Predictions not found for player with id {player_id}")
+    query = supabase.table("predictions").select("*, opponent_team:teams(name)").eq("player_id", player_id)
+    
+    # 如果指定了轮次，则只查询该轮次的预测
+    if gameweek is not None:
+        query = query.eq("gw", gameweek)
+    
+    # 按轮次排序
+    result = query.order("gw").execute()
+    
+    if not result.data:
+        if gameweek is not None:
+            return Content(text=f"Prediction not found for player {player_id} in gameweek {gameweek}")
+        else:
+            return Content(text=f"Predictions not found for player with id {player_id}")
     
     # 构建Pydantic模型列表作为返回结果
-    result = []
-    for p in predictions:
-        result.append(
+    predictions = []
+    for p in result.data:
+        opponent_team_name = p.get('opponent_team', {}).get('name', 'N/A') if isinstance(p.get('opponent_team'), dict) else 'N/A'
+        predictions.append(
             PredictionBase(
-                gw=p.gw,
-                predicted_pts=p.predicted_pts,
-                opponent_team=p.opponent_team.name if p.opponent_team else "N/A",
-                is_home=p.is_home,
-                difficulty=p.difficulty
+                gw=p['gw'],
+                predicted_pts=p['predicted_pts'],
+                opponent_team=opponent_team_name,
+                is_home=p['is_home'],
+                difficulty=p['difficulty']
             )
         )
-        
-    return result
+    
+    return predictions
+
+
 
 
 @app.tool()
 async def get_player_history(ctx: T_AppContext, player_id: int) -> Union[List[PlayerHistoryBase], Content]:
     """Gets the past gameweek performance history for a specific player."""
-    db = ctx.request_context.lifespan_context.db
+    supabase = ctx.request_context.lifespan_context.supabase
     
-    history = db.query(PlayerHistory).filter(PlayerHistory.player_id == player_id).order_by(PlayerHistory.round).all()
-    if not history:
+    result = supabase.table("player_history").select("*, opponent_team:teams(name)").eq("player_id", player_id).order("round").execute()
+    
+    if not result.data:
         return Content(text=f"History not found for player with id {player_id}")
     
-    result = []
-    for h in history:
-        result.append(
+    history = []
+    for h in result.data:
+        opponent_team_name = h.get('opponent_team', {}).get('name', 'N/A') if isinstance(h.get('opponent_team'), dict) else 'N/A'
+        history.append(
             PlayerHistoryBase(
-                round=h.round,
-                opponent_team=h.opponent_team.name if h.opponent_team else "N/A",
-                was_home=h.was_home,
-                total_points=h.total_points,
-                minutes=h.minutes,
-                goals_scored=h.goals_scored,
-                assists=h.assists,
-                clean_sheets=h.clean_sheets,
-                bonus=h.bonus,
+                round=h['round'],
+                opponent_team=opponent_team_name,
+                was_home=h['was_home'],
+                total_points=h['total_points'],
+                minutes=h['minutes'],
+                goals_scored=h['goals_scored'],
+                assists=h['assists'],
+                clean_sheets=h['clean_sheets'],
+                bonus=h['bonus'],
             )
         )
-        
-    return result
+    
+    return history
 
 
 @app.tool()
@@ -386,72 +317,86 @@ async def get_fixtures(ctx: T_AppContext, team_id: Optional[int] = None, gamewee
     返回:
     - 未来对阵信息列表，包括轮次、主队、客队、是否主场和难度系数。
     """
-    db = ctx.request_context.lifespan_context.db
+    supabase = ctx.request_context.lifespan_context.supabase
     
     try:
         # 从预测表中获取当前轮次
-        current_gw = db.query(func.min(Prediction.gw)).scalar()
-        if not current_gw:
+        min_gw_result = supabase.table("predictions").select("gw").order("gw").limit(1).execute()
+        if not min_gw_result.data:
             return Content(text="无法确定当前轮次。")
+        
+        current_gw = min_gw_result.data[0]['gw']
         
         # 计算要查询的轮次范围
         max_gw = current_gw + gameweeks - 1
         
-        # 创建球队ID到名称的映射
-        team_map = {t.id: t.name for t in db.query(Team).all()}
+        # 获取所有球队
+        teams_result = supabase.table("teams").select("id, name").execute()
+        team_map = {team['id']: team['name'] for team in teams_result.data}
         
         # 构建基础查询 - 获取每个轮次中每个球队的一个预测记录
-        base_query = db.query(
-            Prediction.gw,
-            Player.team_id,
-            Prediction.opponent_team_id,
-            Prediction.is_home,
-            Prediction.difficulty
-        ).join(
-            Player, Prediction.player_id == Player.id
-        ).filter(
-            Prediction.gw.between(current_gw, max_gw)
-        )
+        query = supabase.table("predictions").select("gw, player:players(team_id), opponent_team_id, is_home, difficulty").gte("gw", current_gw).lte("gw", max_gw)
         
         # 如果指定了球队ID，则只查询该球队的对阵
         if team_id:
-            base_query = base_query.filter(Player.team_id == team_id)
+            query = query.eq("player.team_id", team_id)
         
-        # 使用group_by来确保每个球队和轮次组合只有一条记录
-        fixtures_data = base_query.group_by(Player.team_id, Prediction.gw).all()
+        result = query.execute()
+        
+        # 使用字典来确保每个球队和轮次组合只有一条记录
+        fixtures_dict = {}
+        for item in result.data:
+            player_data = item.get('player', {})
+            if isinstance(player_data, list) and player_data:
+                player_data = player_data[0]
+            
+            team_id_val = player_data.get('team_id') if isinstance(player_data, dict) else None
+            if not team_id_val:
+                continue
+            
+            key = (team_id_val, item['gw'])
+            if key not in fixtures_dict:
+                fixtures_dict[key] = {
+                    'gw': item['gw'],
+                    'team_id': team_id_val,
+                    'opponent_team_id': item['opponent_team_id'],
+                    'is_home': item['is_home'],
+                    'difficulty': item['difficulty']
+                }
         
         # 构建结果
-        result = []
-        for gw, team_id, opponent_id, is_home, difficulty in fixtures_data:
-            team_name = team_map.get(team_id, "未知")
-            opponent_name = team_map.get(opponent_id, "未知")
+        fixtures_list = []
+        for fixture_data in fixtures_dict.values():
+            team_name = team_map.get(fixture_data['team_id'], "未知")
+            opponent_name = team_map.get(fixture_data['opponent_team_id'], "未知")
             
-            result.append(
+            fixtures_list.append(
                 FixtureInfo(
-                    gameweek=gw,
+                    gameweek=fixture_data['gw'],
                     team_name=team_name,
                     opponent_name=opponent_name,
-                    is_home=is_home,
-                    difficulty=difficulty
+                    is_home=fixture_data['is_home'],
+                    difficulty=fixture_data['difficulty']
                 )
             )
         
         # 按轮次和球队名称排序
-        result.sort(key=lambda x: (x.gameweek, x.team_name))
+        fixtures_list.sort(key=lambda x: (x.gameweek, x.team_name))
         
-        return result
+        return fixtures_list
     except Exception as e:
         return Content(text=f"获取对阵信息时发生错误: {e}")
 
 
 @app.tool()
-async def get_my_team(ctx: T_AppContext) -> Union[MyTeam, Content]:
+async def get_my_team(ctx: T_AppContext) -> MyTeam | Content:
     """
     Retrieves the logged-in user's team for the current gameweek,
     including available chips, free transfers, total points and overall rank.
     """
     fpl_client = ctx.request_context.lifespan_context.fpl_client
     if not fpl_client:
+        logger.error("FPL client not authenticated. Check server logs.")
         return Content(text="FPL client not authenticated. Check server logs.")
 
     try:
@@ -467,16 +412,17 @@ async def get_my_team(ctx: T_AppContext) -> Union[MyTeam, Content]:
         team_players = []
         player_ids = [p['element'] for p in picks]
         
-        # Fetch player details from the database
-        db_players = ctx.request_context.lifespan_context.db.query(Player).filter(Player.id.in_(player_ids)).all()
-        players_map = {p.id: p for p in db_players}
+        # Fetch player details from Supabase
+        supabase = ctx.request_context.lifespan_context.supabase
+        result = supabase.table("players").select("*").in_("player_id", player_ids).execute()
+        players_map = {p['player_id']: p for p in result.data}
 
         total_cost = 0
         for pick in picks:
             player_id = pick['element']
             player_details = players_map.get(player_id)
             if player_details:
-                player_cost = player_details.now_cost / 10.0
+                player_cost = player_details['now_cost'] / 10.0
                 total_cost += player_cost
                 team_players.append(
                     MyTeamPlayer(
@@ -484,8 +430,8 @@ async def get_my_team(ctx: T_AppContext) -> Union[MyTeam, Content]:
                         is_captain=pick['is_captain'],
                         is_vice_captain=pick['is_vice_captain'],
                         position=pick['position'],
-                        player_position=get_player_position(player_details.element_type),
-                        name=player_details.web_name,
+                        player_position=get_player_position(player_details['element_type']),
+                        name=player_details['web_name'],
                         cost=player_cost
                     )
                 )
@@ -512,6 +458,7 @@ async def get_my_team(ctx: T_AppContext) -> Union[MyTeam, Content]:
             overall_rank=overall_rank
         )
     except Exception as e:
+        logger.error(f"An error occurred: {e}")
         return Content(text=f"An error occurred: {e}")
 
 @app.tool()
@@ -526,16 +473,18 @@ async def get_team_fixtures(ctx: T_AppContext, team_name: str, gameweeks: Option
     返回:
     - 该球队的未来对阵信息列表，包括轮次、对手、是否主场和难度系数。
     """
-    db = ctx.request_context.lifespan_context.db
+    supabase = ctx.request_context.lifespan_context.supabase
     
     try:
         # 查找匹配的球队
-        team = db.query(Team).filter(Team.name.contains(team_name)).first()
-        if not team:
+        result = supabase.table("teams").select("*").ilike("name", f"%{team_name}%").execute()
+        if not result.data:
             return Content(text=f"未找到名称包含 '{team_name}' 的球队。")
+        team = result.data[0]
+        team_id = team['team_id']
         
         # 使用get_fixtures函数获取该球队的对阵信息
-        fixtures = await get_fixtures(ctx, team.id, gameweeks)
+        fixtures = await get_fixtures(ctx, team_id, gameweeks)
         if isinstance(fixtures, Content):
             return fixtures
             
