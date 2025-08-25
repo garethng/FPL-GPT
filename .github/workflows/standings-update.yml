@@ -1,14 +1,14 @@
-name: FPL Data Loader Cron Job
+name: FPL Standings Update
 
 on:
   schedule:
     # Run every day at 9:30 UTC
-    - cron: '30 1 * * *'
+    - cron: '0 23 * * *'
   # Allow manual triggering
   workflow_dispatch:
 
 jobs:
-  update-fpl-data:
+  update-standings:
     runs-on: ubuntu-latest
     
     steps:
@@ -30,8 +30,7 @@ jobs:
       env:
         SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
         SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        FPL_EMAIL: ${{ secrets.FPL_EMAIL }}
-        FPL_PASSWORD: ${{ secrets.FPL_PASSWORD }}
       run: |
         cd fpl_data_loader
-        python main.py
+        python main.py --h2h_league 23473
+        python main.py --c_league 23159

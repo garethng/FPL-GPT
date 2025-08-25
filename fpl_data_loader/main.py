@@ -321,14 +321,169 @@ def query_player_by_name(name):
                 difficulty_str = str(pred['difficulty']) if pred['difficulty'] is not None else "N/A"
                 logger.info(f"{pred['gw']:<10} {opponent:<10} {venue:<10} {difficulty_str:<10} {pred['predicted_pts']:.2f}")
 
+async def get_classic_league_standings(league_id):
+    """Get the latest league standings and send to webhook"""
+    try:
+        response = requests.get(f"https://fantasy.premierleague.com/api/leagues-classic/{league_id}/standings/")
+        league = response.json()
+        standings = league['standings']['results']
+        
+        # Prepare webhook payload
+        # webhook_url = os.environ.get('LEAGUE_WEBHOOK_URL')
+        # if not webhook_url:
+        #     logger.info("LEAGUE_WEBHOOK_URL not set, skipping webhook.")
+        #     return
+        
+        stand_str = [f"#{i+1}: {entry['entry_name']} - {entry['total']} points - {entry['player_name']}" for i, entry in enumerate(standings)]
+        stand_str = "\n".join(stand_str)
+        logger.info(f"Standings: {stand_str}")
+        
+        payload = {
+            "title": f"FPL League {league['league']['name']} Standings - {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            "text": stand_str
+        }
+        
+        # Send to webhook
+        webhook_url = "https://www.feishu.cn/flow/api/trigger-webhook/0c73dac154c1da3a6af7d08607fb9c34"
+        response = requests.post(webhook_url, json=payload)
+        response.raise_for_status()
+        logger.info(f"Successfully sent league {league_id} standings to webhook")
+        
+        return standings
+        
+    except Exception as e:
+        logger.info(f"Error getting league standings: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+def get_h2h_league_standings(league_id):
+    response = requests.get(f"https://fantasy.premierleague.com/api/leagues-h2h-matches/league/{league_id}/")
+    data = response.json()
+    result = parse_h2h_league(data)
+    webhook_url = "https://www.feishu.cn/flow/api/trigger-webhook/0c73dac154c1da3a6af7d08607fb9c34"
+    payload = {
+        "title": f"FPL League 晴雪杯 Standings - {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        "text": result
+    }
+    response = requests.post(webhook_url, json=payload)
+    response.raise_for_status()
+    return result
+
+def parse_h2h_league(data):
+    teams = {}
+    for match in data['results']:
+        # Only process matches that have been played (points > 0)
+        if match['entry_1_points'] > 0 or match['entry_2_points'] > 0:
+            # Process team 1
+            team1_id = match['entry_1_entry']
+            if team1_id not in teams:
+                teams[team1_id] = {
+                    'name': match['entry_1_name'],
+                    'player': match['entry_1_player_name'],
+                    'played': 0,
+                    'wins': 0,
+                    'draws': 0,
+                    'losses': 0,
+                    'points_for': 0,
+                    'points_against': 0,
+                    'total_points': 0
+                }
+            
+            # Process team 2
+            team2_id = match['entry_2_entry']
+            if team2_id not in teams:
+                teams[team2_id] = {
+                    'name': match['entry_2_name'],
+                    'player': match['entry_2_player_name'],
+                    'played': 0,
+                    'wins': 0,
+                    'draws': 0,
+                    'losses': 0,
+                    'points_for': 0,
+                    'points_against': 0,
+                    'total_points': 0
+                }
+            
+            # Update stats for both teams
+            teams[team1_id]['played'] += 1
+            teams[team1_id]['points_for'] += match['entry_1_points']
+            teams[team1_id]['points_against'] += match['entry_2_points']
+            teams[team1_id]['wins'] += match['entry_1_win']
+            teams[team1_id]['draws'] += match['entry_1_draw']
+            teams[team1_id]['losses'] += match['entry_1_loss']
+            teams[team1_id]['total_points'] += match['entry_1_total']
+            
+            teams[team2_id]['played'] += 1
+            teams[team2_id]['points_for'] += match['entry_2_points']
+            teams[team2_id]['points_against'] += match['entry_1_points']
+            teams[team2_id]['wins'] += match['entry_2_win']
+            teams[team2_id]['draws'] += match['entry_2_draw']
+            teams[team2_id]['losses'] += match['entry_2_loss']
+            teams[team2_id]['total_points'] += match['entry_2_total']
+    # Convert to list and sort by total points (descending), then points difference
+        standings = []
+        for team_id, stats in teams.items():
+            stats['points_diff'] = stats['points_for'] - stats['points_against']
+            standings.append(stats)
+        # Sort by total points (descending), then points difference (descending)
+        standings.sort(key=lambda x: (-x['total_points'], -x['points_diff']))
+        # Print the standings table
+        str_standings = ""
+        str_standings += "Current Standings\n"
+        str_standings += "-" * 10 + "\n"
+        str_standings += f"{'#':<3} {'Team':<15} {'W':<3} {'D':<3} {'L':<3} {'Pts':<4}\n"
+        str_standings += "-" * 10 + "\n"
+        for i, team in enumerate(standings, 1):
+            # remove blank space in team name
+            str_standings += f"{i:<3} {team['name'].strip():<15} "
+            str_standings += f"{team['wins']:<3} {team['draws']:<3} {team['losses']:<3} "
+            str_standings += f"{team['total_points']:<4}\n"
+        str_standings += "-" * 10 + "\n"
+        # Print summary of played matches
+        str_standings += "\n"
+        str_standings += "Current gameweek:\n"
+        str_standings += "-" * 10 + "\n"
+
+    event = -1
+    for match in data['results'][::-1]:
+        if match['entry_1_points'] > 0 or match['entry_2_points'] > 0:
+            if event == -1:
+                event = match['event']
+            
+            if match['event'] != event:
+                break
+            
+            winner = "Draw"
+            if match['entry_1_win']:
+                winner = match['entry_1_name']
+            elif match['entry_2_win']:
+                winner = match['entry_2_name']
+            
+            str_standings += f"{match['entry_1_name']} {match['entry_1_points']} - {match['entry_2_points']} {match['entry_2_name']}\n"
+            str_standings += f"  Winner: {winner}\n"
+            str_standings += f"  Event: {match['event']}\n"
+            str_standings += "\n"
+    # format str_standings to display beautiful
+    str_standings = str_standings.replace("\n", "\n\n")
+    str_standings = str_standings.replace("  ", " ")
+    str_standings = str_standings.replace("  ", " ")
+    print(str_standings)
+    return str_standings
+
 def main():
     parser = argparse.ArgumentParser(description="FPL Player Data Loader and Querier")
     parser.add_argument("--name", type=str, help="Query player by name")
-    
+    parser.add_argument("--c_league", type=int, help="Get league standings and send to webhook")
+    parser.add_argument("--h2h_league", type=int, help="Get league standings and send to webhook")
     args = parser.parse_args()
     
     if args.name:
         query_player_by_name(args.name)
+    elif args.c_league:
+        asyncio.run(get_classic_league_standings(args.c_league))
+    elif args.h2h_league:
+        get_h2h_league_standings(args.h2h_league)
     else:
         asyncio.run(update_data())
 
