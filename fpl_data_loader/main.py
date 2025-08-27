@@ -239,6 +239,7 @@ async def update_data():
 
 def send_price_change_webhook(price_changes):
     webhook_url = "https://www.feishu.cn/flow/api/trigger-webhook/66148a80728f8b9b94ca8274015bfa93"
+    notice_webhook_url = "https://www.feishu.cn/flow/api/trigger-webhook/c6aabf0ef33c336a4f8c1799d0c79ce6"
     if not webhook_url:
         logger.info("PRICE_CHANGE_WEBHOOK_URL not set, skipping webhook.")
         return
@@ -264,7 +265,31 @@ def send_price_change_webhook(price_changes):
             }
         ]
     } for change in price_changes] 
+    up_notice_str = ""
+    down_notice_str = ""
+    for change in price_changes:
+        if change['old_cost'] < change['new_cost']:
+            up_notice_str += f"🔺 {change['web_name']} {change['team_name']}  {change['old_cost']/10:.1f}M -> {change['new_cost']/10:.1f}M\n"
+        else:
+            down_notice_str += f"🟢 {change['web_name']} {change['team_name']}  {change['old_cost']/10:.1f}M -> {change['new_cost']/10:.1f}M\n"
     
+    up_payload = {
+        "title": "FPL Player Price Risers 📈",
+        "text": up_notice_str
+    }
+    down_payload = {
+        "title": "FPL Player Price Fallers 📉",
+        "text": down_notice_str
+    }
+
+    try:
+        response = requests.post(notice_webhook_url, json=up_payload)
+        response.raise_for_status()
+        response = requests.post(notice_webhook_url, json=down_payload)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        logger.info(f"Error sending price change webhook: {e}")
+
     for payload in payloads:
         try:
             response = requests.post(webhook_url, json=payload)
