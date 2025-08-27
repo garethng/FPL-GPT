@@ -3,7 +3,7 @@ name: FPL Data Loader Cron Job
 on:
   schedule:
     # Run every day at 9:30 UTC
-    - cron: '30 1 * * *'
+    - cron: '00 1 * * *'
   # Allow manual triggering
   workflow_dispatch:
 
