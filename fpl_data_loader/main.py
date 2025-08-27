@@ -1,6 +1,6 @@
 import aiohttp
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone, timedelta, tzinfo
 import os
 import argparse
 from fpl import FPL
@@ -15,6 +15,8 @@ dotenv.load_dotenv()
 
 # 获取数据库连接，优先使用Supabase URL
 HUB_URL = "https://www.fantasyfootballhub.co.uk/player-data/player-data.json"
+
+beijing_time = datetime.now(tz=timezone(offset=timedelta(hours=8), name="Asia/Shanghai") ) 
 
 def get_supabase_client():
     """Get Supabase client"""
@@ -359,21 +361,21 @@ async def get_classic_league_standings(league_id):
         #     logger.info("LEAGUE_WEBHOOK_URL not set, skipping webhook.")
         #     return
         
-        stand_str = [f"#{i+1}: {entry['entry_name']} - {entry['total']} points - {entry['player_name']}" for i, entry in enumerate(standings)]
+        stand_str = [f"#{i+1}: {entry['entry_name']} - {entry['total']} points - {entry['total']-standings[0]['total']}" for i, entry in enumerate(standings)]
         stand_str = "\n".join(stand_str)
         logger.info(f"Standings: {stand_str}")
         
         payload = {
-            "title": f"FPL League {league['league']['name']} Standings - {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            "title": f"FPL League {league['league']['name']} Standings - {beijing_time.strftime('%Y-%m-%d')}",
             "text": stand_str
         }
         
         # Send to webhook
-        webhook_url = "https://www.feishu.cn/flow/api/trigger-webhook/0c73dac154c1da3a6af7d08607fb9c34"
-        response = requests.post(webhook_url, json=payload)
-        response.raise_for_status()
+        # webhook_url = "https://www.feishu.cn/flow/api/trigger-webhook/0c73dac154c1da3a6af7d08607fb9c34"
+        # response = requests.post(webhook_url, json=payload)
+        # response.raise_for_status()
         logger.info(f"Successfully sent league {league_id} standings to webhook")
-        
+        print(payload)
         return standings
         
     except Exception as e:
@@ -388,7 +390,7 @@ def get_h2h_league_standings(league_id):
     result = parse_h2h_league(data)
     webhook_url = "https://www.feishu.cn/flow/api/trigger-webhook/0c73dac154c1da3a6af7d08607fb9c34"
     payload = {
-        "title": f"FPL League 晴雪杯 Standings - {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        "title": f"FPL League 晴雪杯 Standings - {beijing_time.strftime('%Y-%m-%d')}",
         "text": result
     }
     response = requests.post(webhook_url, json=payload)
