@@ -262,6 +262,7 @@ async def get_player_predictions(ctx: T_AppContext, player_id: int, gameweek: Op
         opponent_team_name = p.get('opponent_team', {}).get('name', 'N/A') if isinstance(p.get('opponent_team'), dict) else 'N/A'
         predictions.append(
             PredictionBase(
+                player_id=player_id,
                 gw=p['gw'],
                 predicted_pts=p['predicted_pts'],
                 opponent_team=opponent_team_name,
@@ -276,11 +277,14 @@ async def get_player_predictions(ctx: T_AppContext, player_id: int, gameweek: Op
 
 
 @app.tool()
-async def get_player_history(ctx: T_AppContext, player_id: int) -> Union[List[PlayerHistoryBase], Content]:
+async def get_player_history(ctx: T_AppContext, player_id: int, gameweek: Optional[int] = None) -> Union[List[PlayerHistoryBase], Content]:
     """Gets the past gameweek performance history for a specific player."""
     supabase = ctx.request_context.lifespan_context.supabase
     
-    result = supabase.table("player_history").select("*, opponent_team:teams(name)").eq("player_id", player_id).order("round").execute()
+    query = supabase.table("player_history").select("*, opponent_team:teams(name)").eq("player_id", player_id).order("round")
+    if gameweek is not None:
+        query = query.eq("round", gameweek)
+    result = query.execute()
     
     if not result.data:
         return Content(text=f"History not found for player with id {player_id}")
@@ -290,6 +294,7 @@ async def get_player_history(ctx: T_AppContext, player_id: int) -> Union[List[Pl
         opponent_team_name = h.get('opponent_team', {}).get('name', 'N/A') if isinstance(h.get('opponent_team'), dict) else 'N/A'
         history.append(
             PlayerHistoryBase(
+                player_id=player_id,
                 round=h['round'],
                 opponent_team=opponent_team_name,
                 was_home=h['was_home'],
@@ -306,13 +311,13 @@ async def get_player_history(ctx: T_AppContext, player_id: int) -> Union[List[Pl
 
 
 @app.tool()
-async def get_fixtures(ctx: T_AppContext, team_id: Optional[int] = None, gameweeks: Optional[int] = 5) -> Union[List[FixtureInfo], Content]:
+async def get_fixtures(ctx: T_AppContext, team_id: Optional[int] = None, gameweeks: Optional[int] = 1) -> Union[List[FixtureInfo], Content]:
     """
     获取未来的对阵信息和对阵难度。
     
     参数:
     - team_id: 可选，特定球队的ID。如果提供，则只返回该球队的对阵。
-    - gameweeks: 可选，要查询的未来轮次数量，默认为5轮。
+    - gameweeks: 可选，要查询的特定轮次，默认为第一轮。
     
     返回:
     - 未来对阵信息列表，包括轮次、主队、客队、是否主场和难度系数。
@@ -321,28 +326,21 @@ async def get_fixtures(ctx: T_AppContext, team_id: Optional[int] = None, gamewee
     
     try:
         # 从预测表中获取当前轮次
-        min_gw_result = supabase.table("predictions").select("gw").order("gw").limit(1).execute()
-        if not min_gw_result.data:
-            return Content(text="无法确定当前轮次。")
-        
-        current_gw = min_gw_result.data[0]['gw']
-        
-        # 计算要查询的轮次范围
-        max_gw = current_gw + gameweeks - 1
+
         
         # 获取所有球队
-        teams_result = supabase.table("teams").select("id, name").execute()
-        team_map = {team['id']: team['name'] for team in teams_result.data}
+        teams_result = supabase.table("teams").select("team_id, name").execute()
+        team_map = {team['team_id']: team['name'] for team in teams_result.data}
         
         # 构建基础查询 - 获取每个轮次中每个球队的一个预测记录
-        query = supabase.table("predictions").select("gw, player:players(team_id), opponent_team_id, is_home, difficulty").gte("gw", current_gw).lte("gw", max_gw)
+        query = supabase.table("predictions").select("gw, player:players(team_id), opponent_team_id, is_home, difficulty").gte("gw", gameweeks)
         
         # 如果指定了球队ID，则只查询该球队的对阵
         if team_id:
             query = query.eq("player.team_id", team_id)
         
         result = query.execute()
-        
+        print(result.data)
         # 使用字典来确保每个球队和轮次组合只有一条记录
         fixtures_dict = {}
         for item in result.data:
@@ -459,16 +457,18 @@ async def get_my_team(ctx: T_AppContext) -> MyTeam | Content:
         )
     except Exception as e:
         logger.error(f"An error occurred: {e}")
+        import traceback
+        traceback.print_exc()
         return Content(text=f"An error occurred: {e}")
 
 @app.tool()
-async def get_team_fixtures(ctx: T_AppContext, team_name: str, gameweeks: Optional[int] = 5) -> Union[List[FixtureInfo], Content]:
+async def get_team_fixtures(ctx: T_AppContext, team_name: str, gameweeks: Optional[int] = 1) -> Union[List[FixtureInfo], Content]:
     """
     根据球队名称获取特定球队的未来对阵信息。
     
     参数:
     - team_name: 球队名称（可以是部分名称，将进行模糊匹配）
-    - gameweeks: 可选，要查询的未来轮次数量，默认为5轮。
+    - gameweeks: 可选，要查询的特定轮次，默认为第一轮。
     
     返回:
     - 该球队的未来对阵信息列表，包括轮次、对手、是否主场和难度系数。
