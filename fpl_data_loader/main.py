@@ -371,10 +371,10 @@ async def get_classic_league_standings(league_id):
         }
         
         # Send to webhook
-        webhook_url = "https://www.feishu.cn/flow/api/trigger-webhook/0c73dac154c1da3a6af7d08607fb9c34"
-        response = requests.post(webhook_url, json=payload)
-        response.raise_for_status()
-        logger.info(f"Successfully sent league {league_id} standings to webhook")
+        # webhook_url = "https://www.feishu.cn/flow/api/trigger-webhook/0c73dac154c1da3a6af7d08607fb9c34"
+        # response = requests.post(webhook_url, json=payload)
+        # response.raise_for_status()
+        # logger.info(f"Successfully sent league {league_id} standings to webhook")
         print(payload)
         return standings
         

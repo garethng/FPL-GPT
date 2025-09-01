@@ -311,7 +311,7 @@ async def get_player_history(ctx: T_AppContext, player_id: int, gameweek: Option
 
 
 @app.tool()
-async def get_fixtures(ctx: T_AppContext, team_id: Optional[int] = None, gameweeks: Optional[int] = 1) -> Union[List[FixtureInfo], Content]:
+async def get_fixtures(ctx: T_AppContext, team_id: Optional[int] = None, gameweek: Optional[int] = 1) -> Union[List[FixtureInfo], Content]:
     """
     获取未来的对阵信息和对阵难度。
     
@@ -333,7 +333,7 @@ async def get_fixtures(ctx: T_AppContext, team_id: Optional[int] = None, gamewee
         team_map = {team['team_id']: team['name'] for team in teams_result.data}
         
         # 构建基础查询 - 获取每个轮次中每个球队的一个预测记录
-        query = supabase.table("predictions").select("gw, player:players(team_id), opponent_team_id, is_home, difficulty").gte("gw", gameweeks)
+        query = supabase.table("predictions").select("gw, player:players(team_id), opponent_team_id, is_home, difficulty").gte("gw", gameweek)
         
         # 如果指定了球队ID，则只查询该球队的对阵
         if team_id:
@@ -462,7 +462,7 @@ async def get_my_team(ctx: T_AppContext) -> MyTeam | Content:
         return Content(text=f"An error occurred: {e}")
 
 @app.tool()
-async def get_team_fixtures(ctx: T_AppContext, team_name: str, gameweeks: Optional[int] = 1) -> Union[List[FixtureInfo], Content]:
+async def get_team_fixtures(ctx: T_AppContext, team_name: str, gameweek: Optional[int] = 1) -> Union[List[FixtureInfo], Content]:
     """
     根据球队名称获取特定球队的未来对阵信息。
     
@@ -484,14 +484,16 @@ async def get_team_fixtures(ctx: T_AppContext, team_name: str, gameweeks: Option
         team_id = team['team_id']
         
         # 使用get_fixtures函数获取该球队的对阵信息
-        fixtures = await get_fixtures(ctx, team_id, gameweeks)
+        fixtures = await get_fixtures(ctx, team_id, gameweek)
         if isinstance(fixtures, Content):
             return fixtures
             
         # 只返回该球队的对阵信息
+
         return fixtures
     except Exception as e:
         return Content(text=f"获取球队对阵信息时发生错误: {e}")
+
 
 # To run this server for development, run the following command from the project root:
 # mcp dev mcp_server/main.py
