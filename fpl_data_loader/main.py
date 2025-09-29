@@ -116,34 +116,35 @@ async def update_data():
         players_to_upsert.append(player_data)
 
         # Prepare history data
-        for history_item in player.history:
-            history_data = {
-                "player_id": player.id,
-                "fixture_id": history_item['fixture'],
-                "opponent_team_id": history_item['opponent_team'],
-                "total_points": history_item['total_points'],
-                "was_home": history_item['was_home'],
-                "kickoff_time": history_item['kickoff_time'],
-                "round": history_item['round'],
-                "minutes": history_item['minutes'],
-                "goals_scored": history_item['goals_scored'],
-                "assists": history_item['assists'],
-                "clean_sheets": history_item['clean_sheets'],
-                "goals_conceded": history_item['goals_conceded'],
-                "own_goals": history_item['own_goals'],
-                "penalties_saved": history_item['penalties_saved'],
-                "penalties_missed": history_item['penalties_missed'],
-                "yellow_cards": history_item['yellow_cards'],
-                "red_cards": history_item['red_cards'],
-                "saves": history_item['saves'],
-                "bonus": history_item['bonus'],
-                "bps": history_item['bps'],
-                "influence": history_item['influence'],
-                "creativity": history_item['creativity'],
-                "threat": history_item['threat'],
-                "ict_index": history_item['ict_index']
-            }
-            history_to_insert.append(history_data)
+        if hasattr(player, 'history'):
+            for history_item in player.history:
+                history_data = {
+                    "player_id": player.id,
+                    "fixture_id": history_item['fixture'],
+                    "opponent_team_id": history_item['opponent_team'],
+                    "total_points": history_item['total_points'],
+                    "was_home": history_item['was_home'],
+                    "kickoff_time": history_item['kickoff_time'],
+                    "round": history_item['round'],
+                    "minutes": history_item['minutes'],
+                    "goals_scored": history_item['goals_scored'],
+                    "assists": history_item['assists'],
+                    "clean_sheets": history_item['clean_sheets'],
+                    "goals_conceded": history_item['goals_conceded'],
+                    "own_goals": history_item['own_goals'],
+                    "penalties_saved": history_item['penalties_saved'],
+                    "penalties_missed": history_item['penalties_missed'],
+                    "yellow_cards": history_item['yellow_cards'],
+                    "red_cards": history_item['red_cards'],
+                    "saves": history_item['saves'],
+                    "bonus": history_item['bonus'],
+                    "bps": history_item['bps'],
+                    "influence": history_item['influence'],
+                    "creativity": history_item['creativity'],
+                    "threat": history_item['threat'],
+                    "ict_index": history_item['ict_index']
+                }
+                history_to_insert.append(history_data)
 
     # Upsert players in batches
     if players_to_upsert:
