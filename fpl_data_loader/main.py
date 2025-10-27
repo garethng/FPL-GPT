@@ -111,7 +111,8 @@ async def update_data():
             "chance_of_playing_next_round": getattr(player, 'chance_of_playing_next_round', None),
             "chance_of_playing_this_round": getattr(player, 'chance_of_playing_this_round', None),
             "status": getattr(player, 'status', None),
-            "news": getattr(player, 'news', None)
+            "news": getattr(player, 'news', None),
+            "ownership_percentage": float(player.selected_by_percent) if hasattr(player, 'selected_by_percent') else 0.0
         }
         players_to_upsert.append(player_data)
 
