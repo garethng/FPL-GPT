@@ -2,8 +2,8 @@ name: FPL Standings Update
 
 on:
   schedule:
-    # Run every day at 9:30 UTC
-    - cron: '0 23 * * *'
+    # Run every day at 9:00 UTC
+    - cron: '30 0 * * *'
   # Allow manual triggering
   workflow_dispatch:
 
