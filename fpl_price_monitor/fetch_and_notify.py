@@ -132,6 +132,12 @@ class FPLPriceMonitor:
                 # 获取额外字段
                 change_time = player.get('ChangeTime', player.get('change', ''))
                 progress_tonight_raw = player.get('progressTonight', '')
+                progress_tonight_value = None
+                if progress_tonight_raw:
+                    try:
+                        progress_tonight_value = float(progress_tonight_raw)
+                    except (ValueError, TypeError):
+                        progress_tonight_value = None
                 
                 # 根据数据源应用不同的筛选规则
                 should_include = False
@@ -161,7 +167,8 @@ class FPLPriceMonitor:
                                                        player.get('price', 0))),
                         'ownership': player.get('Ownership', player.get('ownership', 0)),
                         'progress': target,
-'change_time' if change_time else "progress_tonight": change_time if change_time else f"{float(progress_tonight_raw):.2f}%" if progress_tonight_raw else "0.00%"
+                        'change_time': change_time,
+                        'progress_tonight': progress_tonight_value
                     }
                     
                     if target >= 0:  # 上涨
@@ -175,8 +182,8 @@ class FPLPriceMonitor:
             }
         
         # 排序
-        risers.sort(key=lambda x: x['progress'], reverse=True)
-        fallers.sort(key=lambda x: x['progress'])
+        self.sort_players(risers, 'risers')
+        self.sort_players(fallers, 'fallers')
         
         return {
             'source': source_name,
@@ -187,6 +194,34 @@ class FPLPriceMonitor:
             'risers_count': len(risers),
             'fallers_count': len(fallers)
         }
+
+    def get_time_priority(self, change_time: str) -> int:
+        if not change_time:
+            return 2
+
+        change_time_lower = change_time.lower()
+        if 'tonight' in change_time_lower:
+            return 0
+        if 'tomorrow' in change_time_lower:
+            return 1
+        return 2
+
+    def sort_players(self, players: List[Dict], player_type: str) -> None:
+        def percent_value(player: Dict) -> float:
+            if player.get('progress_tonight') is not None:
+                return player['progress_tonight']
+            return player.get('progress', 0)
+
+        if player_type == 'risers':
+            players.sort(
+                key=lambda p: (self.get_time_priority(p.get('change_time', '')),
+                               -percent_value(p))
+            )
+        else:
+            players.sort(
+                key=lambda p: (self.get_time_priority(p.get('change_time', '')),
+                               -abs(percent_value(p)))
+            )
     
     def format_players_as_string(self, players: List[Dict], player_type: str) -> str:
         """
@@ -206,16 +241,16 @@ class FPLPriceMonitor:
         type_text = "即将上涨" if player_type == "risers" else "即将下跌"
         
         result = f"{emoji} {type_text} (共 {len(players)} 人)\n"
-        result += "-" * 50 + "\n"
         
         for i, player in enumerate(players, 1):
-            result += f"{i}. {player['name']} ({player['team']}) - {player['position']}\n"
+            emoji_text = "🔺" if player_type == "risers" else "🟢"
+            result += f"{i}. {emoji_text} {player['name']} ({player['team']}) - {player['position']}\n"
             result += f"   价格: £{player['price']}m | 进度: {player['progress']:+.1f}% | 持有率: {player['ownership']}%"
             
             if player.get('change_time'):
                 result += f" | 时间: {player['change_time']}"
-            if player.get('progress_tonight'):
-                result += f" | 今晚进度: {player['progress_tonight']}"
+            if player.get('progress_tonight') is not None:
+                result += f" | 今晚进度: {player['progress_tonight']:+.2f}%"
             result += "\n"
         
         return result
@@ -351,15 +386,6 @@ class FPLPriceMonitor:
         
         print()
 
-        # 3. 保存分析结果到文件（用于调试）
-        output_file = "fpl_price_analysis.json"
-        with open(output_file, 'w', encoding='utf-8') as f:
-            json.dump({
-                'timestamp': datetime.now().isoformat(),
-                'analyses': analyses,
-                'raw_data': all_data
-            }, f, ensure_ascii=False, indent=2)
-        print(f"💾 分析结果已保存到: {output_file}\n")
 
         
         # 4. 依次发送每个数据源的结果到飞书（只发送有结果的）
@@ -398,7 +424,6 @@ def main():
     if not feishu_webhook:
         print("⚠️  警告: 未设置 FEISHU_WEBHOOK 环境变量，将不会发送飞书通知")
     
-    # 创建监控器
     monitor = FPLPriceMonitor(feishu_webhook)
     
     # 运行监控

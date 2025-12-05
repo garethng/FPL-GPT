@@ -3,7 +3,7 @@ name: FPL Price Monitor
 on:
   # 定时执行 - 每天运行3次（UTC时间）
   schedule:
-    - cron: '0 0 * * *'   # 每天 00:00 UTC (北京时间 08:00)
+    - cron: '30 0 * * *'   # 每天 07:30 UTC (北京时间 15:30)
     - cron: '0 12 * * *'   # 每天 12:00 UTC (北京时间 20:00)
   
   # 支持手动触发
@@ -32,30 +32,4 @@ jobs:
         run: |
           cd fpl_price_monitor
           python fetch_and_notify.py
-      
-      - name: 📤 上传分析结果
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: fpl-price-analysis-${{ github.run_number }}
-          path: fpl_price_monitor/fpl_price_analysis.json
-          retention-days: 30
-      
-      - name: 📝 提交分析结果到仓库（可选）
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-        run: |
-          cd fpl_price_monitor
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          
-          # 创建数据历史目录
-          mkdir -p data_history
-          
-          # 复制分析结果到历史记录
-          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-          cp fpl_price_analysis.json "data_history/analysis_${TIMESTAMP}.json"
-          
-          # 提交更改
-          git add data_history/
-          git diff --quiet && git diff --staged --quiet || (git commit -m "chore: 更新 FPL 价格分析 - ${TIMESTAMP}" && git push)
 
