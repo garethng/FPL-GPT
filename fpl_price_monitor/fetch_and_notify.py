@@ -10,6 +10,7 @@ import os
 import sys
 from typing import Dict, List, Optional
 from datetime import datetime
+import unicodedata
 
 
 class FPLPriceMonitor:
@@ -70,30 +71,67 @@ class FPLPriceMonitor:
         
         self.data_cache = all_data
         return all_data
-    
-    def is_within_two_days(self, change_time: str) -> bool:
+
+    def is_tonight(self, change_time: str) -> bool:
         """
-        判断 change_time 是否在两天内
-        
+        判断 change_time 是否是今晚（tonight）。
+
         Args:
             change_time: 变动时间字符串
-            
+
         Returns:
-            是否在两天内
+            是否为 tonight
         """
         if not change_time or change_time == 'Unknown':
             return False
-        
-        change_time_lower = change_time.lower()
-        
-        # 匹配两天内的时间
-        two_day_keywords = ['tonight', 'tomorrow']
-        
-        for keyword in two_day_keywords:
-            if keyword in change_time_lower:
-                return True
-        
-        return False
+        return 'tonight' in str(change_time).lower()
+
+    def normalize_name(self, name: str) -> str:
+        """用于合并去重的名字规范化：去重音、去空白、转小写。"""
+        if not name:
+            return ""
+        s = str(name).strip()
+        s = "".join(
+            ch for ch in unicodedata.normalize("NFKD", s)
+            if not unicodedata.combining(ch)
+        )
+        s = " ".join(s.split())
+        return s.lower()
+
+    def normalize_team(self, team: str) -> str:
+        if not team:
+            return ""
+        return " ".join(str(team).strip().split()).lower()
+
+    def normalize_position(self, position: str) -> str:
+        """将不同来源的位置统一到 GK/DEF/MID/FOR。"""
+        if not position:
+            return "Unknown"
+        p = str(position).strip().lower()
+        mapping = {
+            "goalkeeper": "GK",
+            "gk": "GK",
+            "defender": "DEF",
+            "def": "DEF",
+            "midfielder": "MID",
+            "mid": "MID",
+            "forward": "FOR",
+            "for": "FOR",
+            "fwd": "FOR",
+            "striker": "FOR",
+        }
+        return mapping.get(p, str(position).strip().upper())
+
+    def extract_player_id(self, player: Dict) -> Optional[str]:
+        """尽量从数据源中提取稳定的球员 ID；提取不到则返回 None。"""
+        candidates = [
+            "PlayerID", "PlayerId", "player_id", "playerId",
+            "id", "ID", "element", "Element", "code", "Code"
+        ]
+        for k in candidates:
+            if k in player and player.get(k) not in (None, "", "Unknown"):
+                return str(player.get(k))
+        return None
     
     def analyze_source_data(self, source_name: str, data: Dict, 
                            rise_threshold: float = 80, 
@@ -131,45 +169,43 @@ class FPLPriceMonitor:
                 
                 # 获取额外字段
                 change_time = player.get('ChangeTime', player.get('change', ''))
-                progress_tonight_raw = player.get('progressTonight', '')
-                progress_tonight_value = None
-                if progress_tonight_raw:
-                    try:
-                        progress_tonight_value = float(progress_tonight_raw)
-                    except (ValueError, TypeError):
-                        progress_tonight_value = None
-                
+
                 # 根据数据源应用不同的筛选规则
                 should_include = False
-                
+
                 if source_name in ['ffhub', 'fix']:
-                    # ffhub 和 fix: 只要两天内的数据
-                    if change_time and self.is_within_two_days(change_time):
-                        should_include = True
-                
+                    # ffhub 和 fix：仅保留今晚（tonight）会变价的数据
+                    should_include = self.is_tonight(change_time)
+
                 elif source_name == 'livefpl':
-                    # livefpl: 只要 progressTonight > 100 或 < -100
+                    # livefpl：只要 progressTonight > 100 或 < -100
+                    progress_tonight_raw = player.get('progressTonight', '')
                     try:
                         progress_tonight = float(progress_tonight_raw) if progress_tonight_raw else 0
                         if abs(progress_tonight) > 100:
                             should_include = True
                     except (ValueError, TypeError):
-                        pass
+                        should_include = False
                 
                 # 如果符合条件，添加到对应列表
                 if should_include:
+                    raw_position = player.get('Position', player.get('position', 'Unknown'))
                     player_data = {
+                        'merge_key': None,
                         'name': player.get('PlayerName', player.get('name', 'Unknown')),
                         'team': player.get('Team', player.get('team', 'Unknown')),
-                        'position': player.get('Position', player.get('position', 'Unknown')),
+                        'position': self.normalize_position(raw_position),
                         'price': player.get('Value',
                                             player.get('value',
                                                        player.get('price', 0))),
-                        'ownership': player.get('Ownership', player.get('ownership', 0)),
-                        'progress': target,
-                        'change_time': change_time,
-                        'progress_tonight': progress_tonight_value
+                        'ownership': player.get('Ownership', player.get('ownership', 0))
                     }
+
+                    # 注意：不同数据源的“ID”口径可能不同，会导致同一球员无法合并；
+                    # 因此合并键统一使用（去重音后的）姓名 + 球队。
+                    norm_name = self.normalize_name(player_data.get('name', ''))
+                    norm_team = self.normalize_team(player_data.get('team', ''))
+                    player_data['merge_key'] = f"name:{norm_name}|team:{norm_team}"
                     
                     if target >= 0:  # 上涨
                         risers.append(player_data)
@@ -207,105 +243,129 @@ class FPLPriceMonitor:
         return 2
 
     def sort_players(self, players: List[Dict], player_type: str) -> None:
-        def percent_value(player: Dict) -> float:
-            if player.get('progress_tonight') is not None:
-                return player['progress_tonight']
-            return player.get('progress', 0)
+        # 由于合并消息已取消 progress/progress_tonight，这里按持有率（高->低）再按名字排序
+        def ownership_value(player: Dict) -> float:
+            raw = player.get('ownership', 0)
+            try:
+                return float(raw)
+            except (ValueError, TypeError):
+                return 0.0
 
-        if player_type == 'risers':
-            players.sort(
-                key=lambda p: (self.get_time_priority(p.get('change_time', '')),
-                               -percent_value(p))
-            )
-        else:
-            players.sort(
-                key=lambda p: (self.get_time_priority(p.get('change_time', '')),
-                               -abs(percent_value(p)))
-            )
+        players.sort(key=lambda p: (-ownership_value(p), str(p.get('name', ''))))
     
-    def format_players_as_string(self, players: List[Dict], player_type: str) -> str:
+
+    def merge_players_by_sources(self, analyses: List[Dict]) -> Dict[str, List[Dict]]:
         """
-        将球员列表格式化为字符串
-        
-        Args:
-            players: 球员列表
-            player_type: 'risers' 或 'fallers'
-            
+        将多个数据源的球员列表合并，按球员聚合来源。
+
         Returns:
-            格式化的字符串
+            {'risers': [...], 'fallers': [...]}
         """
+        merged = {'risers': {}, 'fallers': {}}
+
+        for analysis in analyses:
+            source = analysis.get('source', 'Unknown')
+            if 'error' in analysis:
+                continue
+
+            for player_type in ('risers', 'fallers'):
+                for p in analysis.get(player_type, []):
+                    key = p.get('merge_key')
+                    if not key:
+                        # 兜底：用规范化名字+球队合并，避免 position/拼写不一致导致拆分
+                        norm_name = self.normalize_name(p.get('name', ''))
+                        norm_team = self.normalize_team(p.get('team', ''))
+                        key = f"name:{norm_name}|team:{norm_team}"
+                    if key not in merged[player_type]:
+                        merged[player_type][key] = {
+                            'name': p.get('name', 'Unknown'),
+                            'team': p.get('team', 'Unknown'),
+                            'position': self.normalize_position(p.get('position', 'Unknown')),
+                            'price': p.get('price', 0),
+                            'ownership': p.get('ownership', 0),
+                            'sources': set()
+                        }
+                    else:
+                        # 合并时做一点“择优”：持有率更高的覆盖（不同源小数位差异时更稳定）
+                        try:
+                            cur_own = float(merged[player_type][key].get('ownership', 0))
+                        except (ValueError, TypeError):
+                            cur_own = 0.0
+                        try:
+                            new_own = float(p.get('ownership', 0))
+                        except (ValueError, TypeError):
+                            new_own = 0.0
+                        if new_own > cur_own:
+                            merged[player_type][key]['ownership'] = p.get('ownership', merged[player_type][key].get('ownership', 0))
+
+                        # position 统一后保持成 GK/DEF/MID/FOR
+                        merged[player_type][key]['position'] = self.normalize_position(
+                            merged[player_type][key].get('position', p.get('position', 'Unknown'))
+                        )
+                    merged[player_type][key]['sources'].add(source)
+
+        risers = list(merged['risers'].values())
+        fallers = list(merged['fallers'].values())
+        self.sort_players(risers, 'risers')
+        self.sort_players(fallers, 'fallers')
+
+        # 将 sources set 转成排序后的 list，方便格式化
+        for p in risers + fallers:
+            p['sources'] = sorted(list(p.get('sources', [])))
+
+        return {'risers': risers, 'fallers': fallers}
+
+    def format_merged_players_as_string(self, players: List[Dict], player_type: str) -> str:
+        """
+        按参考格式输出（编号 + emoji + 两段式详情），并在位置之后追加数据源。
+        """
+        is_risers = player_type == "risers"
+        header_emoji = "📈" if is_risers else "📉"
+        header_text = "即将上涨" if is_risers else "即将下跌"
+        item_emoji = "🔺" if is_risers else "🟢"
+
         if not players:
-            return ""
-        
-        emoji = "📈" if player_type == "risers" else "📉"
-        type_text = "即将上涨" if player_type == "risers" else "即将下跌"
-        
-        result = f"{emoji} {type_text} (共 {len(players)} 人)\n"
-        
+            return f"{header_emoji} {header_text} (共 0 人)\n暂无符合条件的球员"
+
+        # 不要输出任何空白行：每个球员严格两行（信息行 + 价格行）
+        lines = [f"{header_emoji} {header_text} (共 {len(players)} 人)"]
+
         for i, player in enumerate(players, 1):
-            emoji_text = "🔺" if player_type == "risers" else "🟢"
-            result += f"{i}. {emoji_text} {player['name']} ({player['team']}) - {player['position']}\n"
-            result += f"   价格: £{player['price']}m | 进度: {player['progress']:+.1f}% | 持有率: {player['ownership']}%"
-            
-            if player.get('change_time'):
-                result += f" | 时间: {player['change_time']}"
-            if player.get('progress_tonight') is not None:
-                result += f" | 今晚进度: {player['progress_tonight']:+.2f}%"
-            result += "\n"
-        
-        return result
-    
-    def build_feishu_message(self, analysis: Dict) -> Dict:
+            sources = ",".join(player.get('sources', [])) or "Unknown"
+            name = player.get('name', 'Unknown')
+            team = player.get('team', 'Unknown')
+            position = self.normalize_position(player.get('position', 'Unknown'))
+            price = player.get('price', 0)
+            ownership = player.get('ownership', 0)
+
+            lines.append(f"{i}. {item_emoji} {name} ({team}) - {position} ({sources})")
+            lines.append(f"   价格: £{price}m | 持有率: {ownership}%")
+
+        return "\n".join(lines).rstrip()
+
+    def build_feishu_message_merged(self, analyses: List[Dict]) -> Dict:
         """
-        构建飞书消息（单个数据源）
-        
-        Args:
-            analysis: 单个数据源的分析结果
-            
-        Returns:
-            飞书消息体
+        构建飞书消息（合并三个数据源，且仅展示 tonight）。
         """
-        source = analysis.get('source', 'Unknown')
-        
-        # 如果有错误，返回简单消息
-        if 'error' in analysis:
-            return {
-                "msg_type": "text",
-                "content": {
-                    "text": f"❌ {source} 数据获取失败: {analysis['error']}"
-                }
-            }
-        
-        # 构建球员信息字符串
-        risers_text = self.format_players_as_string(analysis.get('risers', []), 'risers')
-        fallers_text = self.format_players_as_string(analysis.get('fallers', []), 'fallers')
-        
-        # 组合所有信息
-        players_info = ""
-        if risers_text:
-            players_info += risers_text + "\n"
-        if fallers_text:
-            players_info += fallers_text
-        
-        # 筛选规则说明
-        filter_rule = ""
-        if source in ['ffhub', 'fix']:
-            filter_rule = "仅显示2天内变动的球员"
-        elif source == 'livefpl':
-            filter_rule = "仅显示 progressTonight ±100% 以上"
-        
-        # 构建消息
-        message = {
+        merged = self.merge_players_by_sources(analyses)
+
+        risers_text = self.format_merged_players_as_string(merged.get('risers', []), "risers")
+        fallers_text = self.format_merged_players_as_string(merged.get('fallers', []), "fallers")
+
+        # 分组之间也不输出空白行
+        text = f"{risers_text}\n{fallers_text}"
+
+        return {
             "msg_type": "post",
             "content": {
                 "post": {
                     "zh_cn": {
-                        "title": f"🏆 FPL 价格变动监控 - {source}",
+                        "title": "🏆 FPL 价格变动监控（合并）",
                         "content": [
                             [
                                 {
                                     "tag": "text",
-                                    "text": players_info if players_info else "暂无符合条件的球员"
+                                    "text": text
                                 }
                             ]
                         ]
@@ -313,8 +373,6 @@ class FPLPriceMonitor:
                 }
             }
         }
-        
-        return message
     
     def send_to_feishu(self, message: Dict) -> bool:
         """
@@ -388,28 +446,18 @@ class FPLPriceMonitor:
 
 
         
-        # 4. 依次发送每个数据源的结果到飞书（只发送有结果的）
+        # 4. 合并三个数据源的结果后发送到飞书（只发送一次）
         if self.feishu_webhook:
             print("="*80)
             print("📤 开始发送消息到飞书")
             print("="*80)
             
-            sent_count = 0
-            for analysis in analyses:
-                # 只发送有球员结果的数据源
-                if analysis.get('risers_count', 0) > 0 or analysis.get('fallers_count', 0) > 0:
-                    print(f"📤 发送 {analysis.get('source')} 的结果...")
-                    message = self.build_feishu_message(analysis)
-                    if self.send_to_feishu(message):
-                        sent_count += 1
-                    print(message)
-                else:
-                    print(f"⏭️  跳过 {analysis.get('source')} (无符合条件的球员)")
-
-            if sent_count == 0:
-                print("ℹ️  所有数据源都没有符合条件的球员，未发送消息")
+            message = self.build_feishu_message_merged(analyses)
+            if self.send_to_feishu(message):
+                print("✅ 已发送合并消息")
             else:
-                print(f"✅ 成功发送 {sent_count} 条消息")
+                print("❌ 合并消息发送失败")
+            print(message)
         
         print("\n" + "="*80)
         print("✅ 监控任务完成")
