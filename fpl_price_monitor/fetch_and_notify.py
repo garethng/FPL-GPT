@@ -23,16 +23,99 @@ class FPLPriceMonitor:
         'livefpl': 'https://allaboutfantasy.cn/api/getpricepredict?source=livefpl'
     }
     
-    def __init__(self, feishu_webhook: Optional[str] = None):
+    def __init__(self, feishu_webhook: Optional[str] = None, user_webhooks: Dict[int, str] = None):
         """
         初始化监控器
         
         Args:
-            feishu_webhook: 飞书 webhook URL
+            feishu_webhook: 默认飞书 webhook URL
+            user_webhooks: 用户 ID 到 webhook URL 的映射字典 {team_id: webhook_url}
         """
         self.feishu_webhook = feishu_webhook or os.getenv('FEISHU_WEBHOOK')
+        self.user_webhooks = user_webhooks or {}
+        
+        # 处理 team_id (保持向后兼容)
+        tid = os.getenv('FPL_TEAM_ID')
+        try:
+            self.team_id = int(tid) if tid else None
+        except (ValueError, TypeError):
+            self.team_id = None
+            
+        self.monitored_player_ids = set()
         self.data_cache = {}
-    
+        
+        # FPL 静态数据缓存
+        self.player_id_map = {} # id -> web_name
+        self.player_name_map = {} # web_name -> id
+        self.init_fpl_data()
+
+    def init_fpl_data(self):
+        """初始化 FPL 静态数据（用于 ID 和 名字 的转换）"""
+        try:
+            print("🔄 正在获取 FPL 静态数据...")
+            url = "https://fantasy.premierleague.com/api/bootstrap-static/"
+            response = requests.get(url, timeout=15)
+            response.raise_for_status()
+            data = response.json()
+            
+            for player in data.get('elements', []):
+                pid = player['id']
+                web_name = player['web_name']
+                # 同时也保存 full name 以防万一，但 web_name 通常是标准
+                self.player_id_map[pid] = web_name
+                self.player_name_map[web_name] = pid
+                # 也可以映射 full name
+                full_name = f"{player['first_name']} {player['second_name']}"
+                self.player_name_map[full_name] = pid
+                
+            print(f"✅ FPL 静态数据获取成功 (共 {len(self.player_id_map)} 名球员)")
+            
+            # 获取当前 GW
+            self.current_gw = 1
+            for event in data.get('events', []):
+                if event.get('is_current', False):
+                    self.current_gw = event['id']
+                    break
+                # 如果没有 current，找 next 的前一个
+                elif event.get('is_next', False):
+                    self.current_gw = max(1, event['id'] - 1)
+                    break
+            print(f"📅 当前/最近 Gameweek: {self.current_gw}")
+            
+        except Exception as e:
+            print(f"❌ FPL 静态数据获取失败: {e}")
+
+    def get_user_squad_names(self, team_id: int) -> List[str]:
+        """获取用户当前阵容的球员名字列表"""
+        if not team_id:
+            return []
+            
+        try:
+            # 尝试获取 Picks (无需认证)
+            # 注意：这获取的是该用户在该 GW 的阵容，不包含当周未生效的转会
+            url = f"https://fantasy.premierleague.com/api/entry/{team_id}/event/{self.current_gw}/picks/"
+            response = requests.get(url, timeout=10)
+            
+            # 如果该 GW 还没开始或没数据，可能返回 404，尝试上一周
+            if response.status_code == 404 and self.current_gw > 1:
+                 url = f"https://fantasy.premierleague.com/api/entry/{team_id}/event/{self.current_gw - 1}/picks/"
+                 response = requests.get(url, timeout=10)
+            
+            response.raise_for_status()
+            data = response.json()
+            
+            player_names = []
+            for pick in data.get('picks', []):
+                pid = pick['element']
+                pname = self.player_id_map.get(pid)
+                if pname:
+                    player_names.append(pname)
+            
+            return player_names
+        except Exception as e:
+            print(f"❌ 获取用户 {team_id} 阵容失败: {e}")
+            return []
+
     def fetch_data(self, source_name: str, url: str) -> Optional[Dict]:
         """
         从指定数据源获取数据
@@ -374,48 +457,197 @@ class FPLPriceMonitor:
             }
         }
     
-    def send_to_feishu(self, message: Dict) -> bool:
+    def filter_analysis_for_user(self, analysis: Dict, user_squad_names: List[str]) -> Dict:
+        """为特定用户筛选分析结果（基于名字匹配）"""
+        if 'error' in analysis:
+            return analysis
+            
+        filtered_analysis = analysis.copy()
+        
+        # 筛选 Risers
+        filtered_risers = []
+        for player in analysis.get('risers', []):
+            # 模糊匹配：检查预测的名字是否包含在用户阵容名字中，或者用户阵容名字包含预测名字
+            # 这里简单起见，使用包含关系，因为 web_name 有时会有差异
+            p_name = player['name']
+            
+            # 尝试直接匹配
+            if p_name in user_squad_names:
+                filtered_risers.append(player)
+                continue
+                
+            # 尝试部分匹配 (例如 Son Heung-min vs Son)
+            for user_p_name in user_squad_names:
+                if p_name in user_p_name or user_p_name in p_name:
+                    filtered_risers.append(player)
+                    break
+        
+        filtered_analysis['risers'] = filtered_risers
+        filtered_analysis['risers_count'] = len(filtered_risers)
+        
+        # 筛选 Fallers
+        filtered_fallers = []
+        for player in analysis.get('fallers', []):
+            p_name = player['name']
+            if p_name in user_squad_names:
+                filtered_fallers.append(player)
+                continue
+            for user_p_name in user_squad_names:
+                if p_name in user_p_name or user_p_name in p_name:
+                    filtered_fallers.append(player)
+                    break
+                    
+        filtered_analysis['fallers'] = filtered_fallers
+        filtered_analysis['fallers_count'] = len(filtered_fallers)
+        
+        return filtered_analysis
+
+    def build_combined_feishu_message(self, analyses: List[Dict], title: str = "🏆 FPL 价格变动监控") -> Dict:
         """
-        发送消息到飞书
+        构建合并的飞书消息（多个数据源聚合）
         
         Args:
-            message: 消息体
+            analyses: 分析结果列表
+            title: 消息标题
             
         Returns:
-            是否发送成功
+            飞书消息体
         """
-        if not self.feishu_webhook:
-            print("⚠️  未配置飞书 webhook，跳过发送")
+        if not analyses:
+            return {}
+            
+        # 1. 聚合数据
+        merged_risers = {}
+        merged_fallers = {}
+        
+        def normalize_position(pos):
+            """标准化位置名称"""
+            if not pos: return ""
+            pos = pos.upper()
+            if 'MID' in pos: return 'MID'
+            if 'FOR' in pos or 'FWD' in pos: return 'FOR'
+            if 'DEF' in pos: return 'DEF'
+            if 'GOA' in pos or 'GKP' in pos: return 'GKP'
+            return pos
+
+        def process_players(player_list, target_dict, source_name):
+            for p in player_list:
+                name = p.get('name')
+                team = p.get('team')
+                # 唯一键：名字 + 球队 (防止同名)
+                key = (name, team)
+                
+                if key not in target_dict:
+                    target_dict[key] = {
+                        'name': name,
+                        'team': team,
+                        'position': normalize_position(p.get('position', '')),
+                        'price': p.get('price'),
+                        'ownership': p.get('ownership', 0),
+                        'sources': set()
+                    }
+                
+                # 记录数据源
+                target_dict[key]['sources'].add(source_name)
+                # 更新持有率（取最大值）
+                current_own = target_dict[key]['ownership']
+                new_own = p.get('ownership', 0)
+                try:
+                    if float(new_own) > float(current_own):
+                        target_dict[key]['ownership'] = new_own
+                except (ValueError, TypeError):
+                    pass
+
+        for analysis in analyses:
+            source = analysis.get('source', 'Unknown')
+            if 'error' in analysis:
+                continue
+                
+            process_players(analysis.get('risers', []), merged_risers, source)
+            process_players(analysis.get('fallers', []), merged_fallers, source)
+            
+        # 2. 排序 (按持有率降序)
+        def get_ownership(item):
+            try:
+                return float(item['ownership'])
+            except (ValueError, TypeError):
+                return 0
+
+        sorted_risers = sorted(merged_risers.values(), key=get_ownership, reverse=True)
+        sorted_fallers = sorted(merged_fallers.values(), key=get_ownership, reverse=True)
+        
+        # 3. 构建文本
+        full_text = ""
+        
+        # Risers
+        if sorted_risers:
+            full_text += f"📈 即将上涨 (共 {len(sorted_risers)} 人)\n"
+            for i, p in enumerate(sorted_risers, 1):
+                sources_str = ",".join(sorted(p['sources']))
+                full_text += f"{i}. 🔺 {p['name']} ({p['team']}) - {p['position']} ({sources_str})\n"
+                full_text += f"   价格: £{p['price']}m | 持有率: {p['ownership']}%\n"
+        
+        # Fallers
+        if sorted_fallers:
+            if full_text: full_text += "\n"
+            full_text += f"📉 即将下跌 (共 {len(sorted_fallers)} 人)\n"
+            for i, p in enumerate(sorted_fallers, 1):
+                sources_str = ",".join(sorted(p['sources']))
+                full_text += f"{i}. 🟢 {p['name']} ({p['team']}) - {p['position']} ({sources_str})\n"
+                full_text += f"   价格: £{p['price']}m | 持有率: {p['ownership']}%\n"
+                
+        if not full_text:
+            full_text = "暂无相关变动"
+            
+        full_text = full_text.strip()
+
+        # 构建消息
+        message = {
+            "msg_type": "post",
+            "content": {
+                "post": {
+                    "zh_cn": {
+                        "title": title,
+                        "content": [
+                            [
+                                {
+                                    "tag": "text",
+                                    "text": full_text
+                                }
+                            ]
+                        ]
+                    }
+                }
+            }
+        }
+        
+        return message
+
+    def send_to_webhook(self, message: Dict, webhook_url: str) -> bool:
+        """发送消息到指定 Webhook"""
+        if not webhook_url:
             return False
         
         try:
-            print(f"📤 正在发送消息到飞书...")
+            # print(f"📤 正在发送消息到 {webhook_url[:10]}...")
             response = requests.post(
-                self.feishu_webhook,
+                webhook_url,
                 json=message,
                 headers={'Content-Type': 'application/json'},
                 timeout=10
             )
             response.raise_for_status()
             result = response.json()
-            
             if result.get('code') == 0 or result.get('StatusCode') == 0:
-                print("✅ 消息发送成功")
                 return True
-            else:
-                print(f"❌ 消息发送失败: {result}")
-                return False
-        except Exception as e:
-            print(f"❌ 发送消息时出错: {e}")
             return False
-    
+        except Exception as e:
+            print(f"❌ 发送消息失败: {e}")
+            return False
+
     def run(self, rise_threshold: float = 80, fall_threshold: float = -80):
         """
         执行完整的监控流程
-        
-        Args:
-            rise_threshold: 上涨阈值
-            fall_threshold: 下跌阈值
         """
         print("="*80)
         print("🏆 FPL 价格变动监控启动")
@@ -430,7 +662,7 @@ class FPLPriceMonitor:
         
         print(f"\n✅ 成功获取 {len(all_data)} 个数据源的数据\n")
         
-        # 2. 分析每个数据源
+        # 2. 分析每个数据源 (全局)
         analyses = []
         for source_name, data in all_data.items():
             print(f"📊 分析 {source_name} 数据...")
@@ -443,25 +675,65 @@ class FPLPriceMonitor:
             print(f"   - 接近下跌: {analysis.get('fallers_count', 0)} 人")
         
         print()
-
-
         
-        # 4. 合并三个数据源的结果后发送到飞书（只发送一次）
+        # 3. 发送全局通知 (Default Webhook)
         if self.feishu_webhook:
             print("="*80)
-            print("📤 开始发送消息到飞书")
+            print("📤 发送全局通知 (合并)")
             print("="*80)
             
-            message = self.build_feishu_message_merged(analyses)
-            if self.send_to_feishu(message):
-                print("✅ 已发送合并消息")
+            # 过滤掉没有结果的数据源用于聚合，但实际上 build_combined 已经能处理
+            valid_global_analyses = [a for a in analyses if a.get('risers_count', 0) > 0 or a.get('fallers_count', 0) > 0]
+            
+            if valid_global_analyses:
+                global_message = self.build_combined_feishu_message(valid_global_analyses, title="🏆 FPL 价格变动监控（合并）")
+                print("--- Global Combined Message Content ---")
+                print(json.dumps(global_message, indent=2, ensure_ascii=False))
+                self.send_to_webhook(global_message, self.feishu_webhook)
             else:
-                print("❌ 合并消息发送失败")
-            print(message)
+                print("ℹ️ 无符合条件的变动，跳过全局通知")
         
+        # 4. 发送个人通知 (User Webhooks)
+        if self.user_webhooks:
+            print("\n" + "="*80)
+            print("👤 处理个人用户通知")
+            print("="*80)
+            
+            for team_id, webhook_url in self.user_webhooks.items():
+                print(f"🔍 检查用户 {team_id} 的阵容...")
+                squad_names = self.get_user_squad_names(team_id)
+                if not squad_names:
+                    print(f"   ⚠️ 无法获取用户 {team_id} 的阵容或阵容为空")
+                    continue
+                    
+                print(f"   ✅ 用户 {team_id} 阵容包含 {len(squad_names)} 名球员")
+                
+                # 收集该用户所有数据源的分析结果
+                user_valid_analyses = []
+                for analysis in analyses:
+                    # 为用户筛选结果
+                    user_analysis = self.filter_analysis_for_user(analysis, squad_names)
+                    
+                    if user_analysis.get('risers_count', 0) > 0 or user_analysis.get('fallers_count', 0) > 0:
+                        print(f"   Found match in {analysis['source']}: +{user_analysis['risers_count']} / -{user_analysis['fallers_count']}")
+                        user_valid_analyses.append(user_analysis)
+                
+                if user_valid_analyses:
+                    print(f"   📤 正在合并 {len(user_valid_analyses)} 个数据源的通知发送给用户 {team_id}...")
+                    combined_message = self.build_combined_feishu_message(user_valid_analyses, title="🏆 FPL 价格变动监控 (你的阵容)")
+                    print(f"--- Combined User Message Content (User {team_id}) ---")
+                    print(json.dumps(combined_message, indent=2, ensure_ascii=False))
+                    if self.send_to_webhook(combined_message, webhook_url):
+                        print(f"   ✅ 用户 {team_id} 通知发送成功")
+                    else:
+                        print(f"   ❌ 用户 {team_id} 通知发送失败")
+                else:
+                    print(f"   ℹ️ 用户 {team_id} 无相关价格变动")
+
         print("\n" + "="*80)
         print("✅ 监控任务完成")
         print("="*80)
+
 
 
 def main():
@@ -469,10 +741,19 @@ def main():
     # 从环境变量读取飞书 webhook
     feishu_webhook = "https://www.feishu.cn/flow/api/trigger-webhook/2791fe5ac1644dfc97bb872bc41dce35"
     
-    if not feishu_webhook:
-        print("⚠️  警告: 未设置 FEISHU_WEBHOOK 环境变量，将不会发送飞书通知")
+    # 用户映射配置 (User ID -> Webhook URL)
+    # 可以在这里添加具体的映射，或者从配置文件/环境变量读取
+    # 示例:
+    # user_webhooks = {
+    #     123456: "https://www.feishu.cn/flow/api/trigger-webhook/...",
+    #     789012: "https://www.feishu.cn/flow/api/trigger-webhook/..."
+    # }
+    user_webhooks = {
+        "123097": "https://www.feishu.cn/flow/api/trigger-webhook/816cf2a06513b904a8830e68c13393b2",
+        "2374827": "https://www.feishu.cn/flow/api/trigger-webhook/d22c4ccd36f78c3ca994631a959d5e47"
+    }
     
-    monitor = FPLPriceMonitor(feishu_webhook)
+    monitor = FPLPriceMonitor(feishu_webhook, user_webhooks=user_webhooks)
     
     # 运行监控
     monitor.run(rise_threshold=80, fall_threshold=-80)
