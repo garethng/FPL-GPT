@@ -183,55 +183,34 @@ async def update_data():
             'difficulty': fixture.team_a_difficulty
         }
     
-    # Part 3: Fetch and insert prediction data from Hub
-    logger.info(f"[{datetime.now()}] Fetching prediction data from Fantasy Football Hub...")
+    # Part 3: Generate predictions using internal model
+    logger.info(f"[{datetime.now()}] Generating predictions using internal model (my_predictor)...")
     try:
-        response = requests.get(HUB_URL)
-        response.raise_for_status()
-        hub_players_data = response.json()
-        logger.info(f"[{datetime.now()}] Fetched prediction data.")
-
-        predictions_to_insert = []
-        for hub_player in hub_players_data:
-            fpl_info = hub_player.get('fpl', {})
-            player_id = fpl_info.get('id')
-            if player_id:
-                # 获取球员所属球队ID
-                player_result = supabase.table("players").select("team_id").eq("player_id", player_id).execute()
-                if not player_result.data:
-                    continue
-                
-                team_id = player_result.data[0]['team_id']
-                team_fixtures = fixtures_by_team_gw.get(team_id, {})
-                
-                predictions = hub_player.get('data', {}).get('predictions', [])
-                for prediction in predictions:
-                    gw = prediction.get('gw')
-                    predicted_pts = prediction.get('predicted_pts')
-                    
-                    # 获取该轮次的赛程信息
-                    fixture_info = team_fixtures.get(gw, {})
-                    opponent_team_id = fixture_info.get('opponent_team_id')
-                    is_home = fixture_info.get('is_home')
-                    difficulty = fixture_info.get('difficulty')
-                    
-                    # 准备预测数据
-                    prediction_data = {
-                        "player_id": player_id,
-                        "gw": gw,
-                        "predicted_pts": predicted_pts,
-                        "opponent_team_id": opponent_team_id,
-                        "is_home": is_home,
-                        "difficulty": difficulty
-                    }
-                    predictions_to_insert.append(prediction_data)
+        from my_predictor import Predictor
+        predictor = Predictor(supabase_client=supabase)
+        predictions = predictor.generate_predictions()
         
-        # Insert predictions
-        if predictions_to_insert:
-            supabase.table("predictions").upsert(predictions_to_insert, on_conflict="player_id,gw").execute()
-            
-    except requests.exceptions.RequestException as e:
-        logger.info(f"Error fetching prediction data: {e}")
+        if predictions:
+            logger.info(f"[{datetime.now()}] Saving {len(predictions)} predictions to Supabase...")
+            # Upsert in batches of 1000
+            batch_size = 1000
+            for i in range(0, len(predictions), batch_size):
+                batch = predictions[i:i + batch_size]
+                supabase.table("predictions").upsert(batch, on_conflict="player_id,gw").execute()
+            logger.info(f"[{datetime.now()}] Predictions saved.")
+        else:
+            logger.info("No predictions generated.")
+
+    except Exception as e:
+        logger.error(f"Error generating/saving internal predictions: {e}")
+        import traceback
+        traceback.print_exc()
+
+    # Part 3b: (Optional) Fetch prediction data from Hub (Legacy/Backup)
+    # logger.info(f"[{datetime.now()}] Fetching prediction data from Fantasy Football Hub...")
+    # try:
+    #     response = requests.get(HUB_URL)
+    # ... (commented out legacy hub code)
     
     logger.info(f"[{datetime.now()}] Data has been successfully updated to Supabase")
     

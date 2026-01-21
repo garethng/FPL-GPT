@@ -1,0 +1,351 @@
+import asyncio
+import os
+import argparse
+from typing import List, Dict, Any
+from collections import defaultdict
+import math
+
+from dotenv import load_dotenv
+from fpl import FPL
+from supabase import create_client
+
+# Suppress warnings
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+load_dotenv()
+
+# --- Configuration ---
+WEIGHT_RECENT = 1.0 
+DIFFICULTY_STEP = 0.1 
+HOME_ADVANTAGE = 1.1
+
+# FPL Scoring Constants (2025/26)
+PTS_MINS_60 = 2
+PTS_MINS_1 = 1
+PTS_GOAL_FWD = 4
+PTS_GOAL_MID = 5
+PTS_GOAL_DEF = 6
+PTS_GOAL_GK = 10
+PTS_ASSIST = 3
+PTS_CS_DEF = 4
+PTS_CS_MID = 1
+PTS_CS_GK = 4
+PTS_SAVES_3 = 1
+PTS_YEL = -1
+PTS_RED = -3
+PTS_OWN_GOAL = -2
+PTS_GC_2_DEF = -1 
+
+def get_position_name(element_type):
+    return {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}.get(element_type, "UNK")
+
+class Predictor:
+    def __init__(self):
+        self.supabase_url = os.environ.get("SUPABASE_URL")
+        self.supabase_key = os.environ.get("SUPABASE_KEY")
+        if not self.supabase_url or not self.supabase_key:
+            raise ValueError("Supabase credentials missing")
+        self.supabase = create_client(self.supabase_url, self.supabase_key)
+        
+        self.fpl_session = requests.Session()
+        self.fpl_session.verify = False
+        retries = Retry(total=3, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
+        self.fpl_session.mount('https://', HTTPAdapter(max_retries=retries))
+
+        self.global_ratios = {} # Store conversion rates by position
+
+    async def fetch_data(self):
+        print("Fetching data...")
+        # 1. Fetch all players
+        self.players = {}
+        # Fetching in chunks if necessary, but 1000 players is fine for one call usually (max is often 1000)
+        # Players table is usually < 1000 rows (approx 700-800)
+        res = self.supabase.table("players").select("player_id, web_name, element_type, team_id, status, now_cost").execute()
+        for p in res.data:
+            self.players[p['player_id']] = p
+
+        # 2. Fetch History (All history for training)
+        print("Fetching full player history...")
+        self.history = defaultdict(list)
+        
+        # Paginate to get all history
+        limit = 1000
+        offset = 0
+        all_history = []
+        while True:
+            res = self.supabase.table("player_history").select("*").range(offset, offset + limit - 1).order("round", desc=True).execute()
+            batch = res.data
+            all_history.extend(batch)
+            if len(batch) < limit:
+                break
+            offset += limit
+            print(f"  Fetched {len(all_history)} records...")
+            
+        print(f"Total history records: {len(all_history)}")
+
+        for h in all_history:
+            self.history[h['player_id']].append(h)
+
+        # 3. Get Next GW Fixtures
+        print("Fetching fixtures...")
+        resp = self.fpl_session.get("https://fantasy.premierleague.com/api/fixtures/?future=1")
+        fixtures = resp.json()
+        
+        if not fixtures:
+            print("No future fixtures found.")
+            return None
+        
+        self.next_gw = fixtures[0]['event']
+        print(f"Next Gameweek: {self.next_gw}")
+        
+        self.team_fixtures = {}
+        gw_fixtures = [f for f in fixtures if f['event'] == self.next_gw]
+        
+        for f in gw_fixtures:
+            home = f['team_h']
+            away = f['team_a']
+            diff_h = f['team_h_difficulty']
+            diff_a = f['team_a_difficulty']
+            self.team_fixtures[home] = {'opponent': away, 'difficulty': diff_h, 'is_home': True}
+            self.team_fixtures[away] = {'opponent': home, 'difficulty': diff_a, 'is_home': False}
+
+        return self.next_gw
+
+    def train_global_ratios(self):
+        """
+        Calculates conversion rates (Threat -> Goals, Creativity -> Assists) per position 
+        using the entire history dataset.
+        """
+        print("Training model on historical data...")
+        stats = {
+            1: {'goals': 0, 'threat': 0, 'assists': 0, 'creativity': 0},
+            2: {'goals': 0, 'threat': 0, 'assists': 0, 'creativity': 0},
+            3: {'goals': 0, 'threat': 0, 'assists': 0, 'creativity': 0},
+            4: {'goals': 0, 'threat': 0, 'assists': 0, 'creativity': 0},
+        }
+        
+        for pid, games in self.history.items():
+            player = self.players.get(pid)
+            if not player: continue
+            pos = player['element_type']
+            
+            for g in games:
+                stats[pos]['goals'] += g['goals_scored']
+                stats[pos]['threat'] += float(g['threat'])
+                stats[pos]['assists'] += g['assists']
+                stats[pos]['creativity'] += float(g['creativity'])
+        
+        # Calculate Ratios
+        for pos, s in stats.items():
+            t_ratio = s['goals'] / s['threat'] if s['threat'] > 0 else 0
+            c_ratio = s['assists'] / s['creativity'] if s['creativity'] > 0 else 0
+            self.global_ratios[pos] = {
+                'threat_to_goal': t_ratio,
+                'creativity_to_assist': c_ratio
+            }
+            print(f"Pos {get_position_name(pos)}: T2G={t_ratio:.4f}, C2A={c_ratio:.4f}")
+
+
+    def calculate_expected_stats(self, player_id):
+        player = self.players.get(player_id)
+        if not player: return None
+        
+        # Availability Check
+        if player['status'] in ['u', 'i', 'n']: 
+            return None 
+
+        history = self.history.get(player_id, [])
+        history.sort(key=lambda x: x['round'], reverse=True)
+        
+        # Last N games where played
+        played_games = [h for h in history if h['minutes'] > 0]
+        recent_games = played_games[:5]
+        
+        if not recent_games:
+            # Fallback for players with no history: Assume baseline? 
+            # Or just return None/Zero.
+            # For now, return None to avoid noise.
+            return None
+
+        # Weighted Average (More recent = higher weight)
+        total_weight = 0
+        w_threat = 0
+        w_creativity = 0
+        w_mins = 0
+        w_saves = 0
+        w_bonus = 0
+        w_yel = 0
+        w_conceded = 0
+        w_cs = 0 # Clean sheet isn't purely individual, but let's track form
+        
+        for i, g in enumerate(recent_games):
+            weight = 1.0 / (i + 1) # 1.0, 0.5, 0.33, 0.25, 0.2
+            total_weight += weight
+            
+            w_threat += float(g['threat']) * weight
+            w_creativity += float(g['creativity']) * weight
+            w_mins += g['minutes'] * weight
+            w_saves += g['saves'] * weight
+            w_bonus += g['bonus'] * weight
+            w_yel += g['yellow_cards'] * weight
+            w_conceded += g['goals_conceded'] * weight
+            w_cs += g['clean_sheets'] * weight
+
+        avg_threat = w_threat / total_weight
+        avg_creativity = w_creativity / total_weight
+        avg_mins = w_mins / total_weight
+        avg_saves = w_saves / total_weight
+        avg_bonus = w_bonus / total_weight
+        avg_yel = w_yel / total_weight
+        avg_conceded = w_conceded / total_weight
+        avg_cs = w_cs / total_weight
+        
+        if avg_mins < 30: # Filter bench players
+            return None
+
+        # Apply Global Conversion Rates
+        pos = player['element_type']
+        ratios = self.global_ratios.get(pos, {'threat_to_goal': 0, 'creativity_to_assist': 0})
+        
+        base_goals = avg_threat * ratios['threat_to_goal']
+        base_assists = avg_creativity * ratios['creativity_to_assist']
+
+        # Fixture Adjustment
+        team_id = player['team_id']
+        fixture = self.team_fixtures.get(team_id)
+        if not fixture: return None
+            
+        diff = fixture['difficulty']
+        is_home = fixture['is_home']
+        
+        # Difficulty Factors
+        # 3 is neutral.
+        diff_factor = 1 + (3 - diff) * DIFFICULTY_STEP
+        home_factor = HOME_ADVANTAGE if is_home else 1.0
+        total_factor = diff_factor * home_factor
+        
+        # Concede Factor (Opposite of attack)
+        concede_factor = 1 + (diff - 3) * DIFFICULTY_STEP
+
+        proj_goals = base_goals * total_factor
+        proj_assists = base_assists * total_factor
+        proj_cs = avg_cs * total_factor # Clean sheet prob scales with difficulty
+        proj_gc = avg_conceded * concede_factor
+        proj_saves = avg_saves * concede_factor
+        proj_bonus = avg_bonus * total_factor
+        
+        return {
+            'player_id': player_id,
+            'name': player['web_name'],
+            'pos': player['element_type'],
+            'cost': player['now_cost'] / 10.0,
+            'opponent_diff': diff,
+            'is_home': is_home,
+            'stats': {
+                'minutes': avg_mins,
+                'goals': proj_goals,
+                'assists': proj_assists,
+                'clean_sheets': proj_cs,
+                'conceded': proj_gc,
+                'saves': proj_saves,
+                'bonus': proj_bonus,
+                'yellow_cards': avg_yel
+            }
+        }
+
+
+    def calculate_points(self, proj):
+        stats = proj['stats']
+        pos = proj['pos']
+        
+        pts = 0
+        
+        # Minutes
+        if stats['minutes'] >= 60:
+            pts += PTS_MINS_60
+        elif stats['minutes'] > 0:
+            pts += PTS_MINS_1
+            
+        # Goals
+        pts += stats['goals'] * {1: PTS_GOAL_GK, 2: PTS_GOAL_DEF, 3: PTS_GOAL_MID, 4: PTS_GOAL_FWD}[pos]
+        
+        # Assists
+        pts += stats['assists'] * PTS_ASSIST
+        
+        # Clean Sheets
+        if pos in [1, 2]: # GK/DEF
+            pts += stats['clean_sheets'] * PTS_CS_DEF
+        elif pos == 3: # MID
+            pts += stats['clean_sheets'] * PTS_CS_MID
+            
+        # Saves
+        pts += (stats['saves'] / 3) * PTS_SAVES_3
+        
+        # Conceded
+        if pos in [1, 2]:
+            pts += (stats['conceded'] / 2) * PTS_GC_2_DEF
+            
+        # Cards
+        pts += stats['yellow_cards'] * PTS_YEL
+        
+        # Bonus
+        pts += stats['bonus']
+        
+        return pts
+
+    async def run_analysis(self):
+        gw = await self.fetch_data()
+        if not gw: return
+        
+        self.train_global_ratios()
+        
+        print(f"Calculating projections for Gameweek {gw}...")
+        
+        projections = []
+        for pid in self.players:
+            proj = self.calculate_expected_stats(pid)
+            if proj:
+                pts = self.calculate_points(proj)
+                proj['total_points'] = pts
+                projections.append(proj)
+                
+        # Sort by points
+        projections.sort(key=lambda x: x['total_points'], reverse=True)
+        
+        print("\n# Advanced Player Predictions (Data-Driven Model)")
+        print("Method: Weighted Hist. Avg (Threat/Creativity) -> Global Conversion Rates -> Fixture Adj.")
+        print("-" * 80)
+        
+        pos_map = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
+        
+        for pos_id in range(1, 5):
+            print(f"\n## Top {pos_map[pos_id]}s")
+            pos_preds = [p for p in projections if p['pos'] == pos_id][:5] # Top 5
+            
+            for p in pos_preds:
+                s = p['stats']
+                print(f"- **{p['name']}** (£{p['cost']}m) - **{p['total_points']:.1f} pts**")
+                print(f"  xG: {s['goals']:.2f}, xA: {s['assists']:.2f}, xCS: {s['clean_sheets']:.2f}, xBonus: {s['bonus']:.2f}")
+                home_away_str = '(H)' if p['is_home'] else '(A)'
+                print(f"  Mins: {s['minutes']:.0f} | Opp Diff: {p['opponent_diff']} {home_away_str}")
+
+        # Check specific player
+        target = "Haaland"
+        found = next((p for p in projections if target in p['name']), None)
+        if found:
+            print(f"\n## Specific Player: {found['name']}")
+            s = found['stats']
+            print(f"- **{found['name']}** (£{found['cost']}m) - **{found['total_points']:.1f} pts**")
+            print(f"  xG: {s['goals']:.2f}, xA: {s['assists']:.2f}, xCS: {s['clean_sheets']:.2f}, xBonus: {s['bonus']:.2f}")
+            home_away_str = '(H)' if found['is_home'] else '(A)'
+            print(f"  Mins: {s['minutes']:.0f} | Opp Diff: {found['opponent_diff']} {home_away_str}")
+        else:
+            print(f"\nPlayer {target} not found in projections (possibly injured or no recent games).")
+
+if __name__ == "__main__":
+    pred = Predictor()
+    asyncio.run(pred.run_analysis())
