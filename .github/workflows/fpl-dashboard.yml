@@ -35,6 +35,7 @@ jobs:
 
     - name: Install dependencies
       run: |
+        pip install ./fpl
         pip install requests pulp supabase python-dotenv
 
     - name: Generate FPL Data

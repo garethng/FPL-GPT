@@ -42,9 +42,9 @@ sys.path.append(os.path.join(BASE_DIR, 'fpl_data_loader'))
 
 try:
     from my_predictor import Predictor
-except ImportError:
+except ImportError as e:
     # Fallback if path issue
-    print("Could not import Predictor. Breakdown will be unavailable.")
+    print(f"Could not import Predictor: {e}. Breakdown will be unavailable.")
     Predictor = None
 
 class FPLManager:
