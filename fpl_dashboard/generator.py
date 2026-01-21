@@ -37,6 +37,16 @@ PTS_GC_2_DEF = -1
 DIFFICULTY_STEP = 0.1
 HOME_ADVANTAGE = 1.1
 
+import sys
+sys.path.append(os.path.join(BASE_DIR, 'fpl_data_loader'))
+
+try:
+    from my_predictor import Predictor
+except ImportError:
+    # Fallback if path issue
+    print("Could not import Predictor. Breakdown will be unavailable.")
+    Predictor = None
+
 class FPLManager:
     def __init__(self):
         self.supabase_url = os.environ.get("SUPABASE_URL")
@@ -50,6 +60,33 @@ class FPLManager:
         self.session = requests.Session()
         retries = Retry(total=3, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
         self.session.mount('https://', HTTPAdapter(max_retries=retries))
+
+        # Initialize Predictor for breakdown
+        if Predictor:
+            self.predictor = Predictor(self.supabase)
+        else:
+            self.predictor = None
+
+    def enrich_with_breakdown(self, team):
+        """Adds detailed points breakdown to the selected team."""
+        if not self.predictor: return team
+        
+        print("Enriching team with detailed points breakdown...")
+        # Ensure predictor has data
+        # We assume fetch_data() loads everything needed.
+        # Check if loaded? Predictor logic checks internally or we call it.
+        # But my_predictor.fetch_data() is what loads history.
+        # get_points_breakdown calls fetch_data/train if needed.
+        
+        for p in team:
+            try:
+                bd = self.predictor.get_points_breakdown(p['player_id'])
+                if bd:
+                    p['breakdown'] = bd['breakdown']
+            except Exception as e:
+                print(f"Error getting breakdown for {p['web_name']}: {e}")
+        
+        return team
 
     def get_fpl_status(self):
         resp = self.session.get("https://fantasy.premierleague.com/api/bootstrap-static/")
@@ -311,6 +348,9 @@ class FPLManager:
             if not team:
                 print("Failed to optimize team.")
                 return
+            
+            # Enrich with breakdown
+            team = self.enrich_with_breakdown(team)
                 
             total_pred = sum(p['predicted_points'] * (2 if p['is_captain'] else 1) for p in team if p['role'] == 'Starter')
             

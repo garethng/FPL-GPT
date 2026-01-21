@@ -60,6 +60,113 @@
     <!-- Main Content -->
     <main class="max-w-7xl mx-auto px-4 py-8" x-show="loaded" x-transition>
         
+        <!-- Player Detail Modal -->
+        <div class="fixed inset-0 z-50 flex items-center justify-center px-4" 
+             x-show="selectedPlayer" 
+             x-transition.opacity
+             style="display: none;">
+            
+            <!-- Backdrop -->
+            <div class="absolute inset-0 bg-black/80 backdrop-blur-sm" @click="selectedPlayer = null"></div>
+            
+            <!-- Modal Content -->
+            <div class="bg-white text-gray-900 rounded-2xl shadow-2xl w-full max-w-md relative z-10 overflow-hidden" 
+                 x-show="selectedPlayer"
+                 x-transition:enter="transition ease-out duration-300"
+                 x-transition:enter-start="opacity-0 scale-90 translate-y-4"
+                 x-transition:enter-end="opacity-100 scale-100 translate-y-0">
+                
+                <template x-if="selectedPlayer">
+                    <div>
+                        <!-- Header -->
+                        <div class="bg-gray-100 p-6 flex justify-between items-center border-b border-gray-200">
+                            <div class="flex items-center space-x-4">
+                                <div class="w-16 h-16 rounded-full border-2 border-white shadow-lg overflow-hidden bg-gray-200 flex items-center justify-center">
+                                    <!-- Kit/Team Placeholder -->
+                                    <span class="text-xl font-bold text-gray-500" x-text="selectedPlayer.team_id"></span>
+                                </div>
+                                <div>
+                                    <h2 class="text-2xl font-bold leading-none" x-text="selectedPlayer.web_name"></h2>
+                                    <div class="text-sm text-gray-500 mt-1 font-mono">
+                                        <span x-text="getPositionName(selectedPlayer.element_type)"></span> • 
+                                        £<span x-text="(selectedPlayer.now_cost/10).toFixed(1)"></span>m • 
+                                        <span x-text="selectedPlayer.team_short_name"></span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="text-right">
+                                <div class="text-xs text-gray-500 uppercase tracking-wider mb-1">Points</div>
+                                <div class="text-3xl font-bold bg-gray-900 text-white px-3 py-1 rounded-lg" 
+                                     x-text="data.status === 'live' ? selectedPlayer.live_points : selectedPlayer.predicted_points.toFixed(2)"></div>
+                            </div>
+                        </div>
+
+                        <!-- Fixture Info -->
+                        <div class="px-6 py-4 border-b border-gray-100 flex justify-between items-center bg-gray-50/50">
+                            <div class="text-sm font-semibold text-gray-500">FIXTURE</div>
+                            <div class="flex items-center space-x-2">
+                                <span class="w-2 h-2 rounded-full" 
+                                      :class="selectedPlayer.opponent_difficulty <= 2 ? 'bg-green-500' : (selectedPlayer.opponent_difficulty >= 4 ? 'bg-red-500' : 'bg-yellow-500')"></span>
+                                <span class="font-bold text-lg" x-text="selectedPlayer.opponent_short_name"></span>
+                                <span class="text-gray-400 text-sm" x-text="selectedPlayer.is_home ? '(H)' : '(A)'"></span>
+                            </div>
+                        </div>
+
+                        <!-- Breakdown Table -->
+                        <div class="p-6">
+                            <h3 class="text-xs font-bold text-gray-900 uppercase tracking-widest mb-4">Points Breakdown</h3>
+                            
+                            <template x-if="selectedPlayer.breakdown && data.status !== 'live'">
+                                <div class="space-y-3 text-sm">
+                                    <!-- Row Template -->
+                                    <template x-for="(item, key) in formatBreakdown(selectedPlayer.breakdown)">
+                                        <div class="flex justify-between items-center group">
+                                            <div class="text-gray-500 font-medium uppercase text-xs" x-text="key.replace('_', ' ')"></div>
+                                            <div class="flex items-center space-x-2 font-mono text-gray-700">
+                                                <template x-if="item.multiplier">
+                                                    <span class="text-gray-400 text-xs">
+                                                        <span x-text="item.value.toFixed(2)"></span> x <span x-text="item.multiplier"></span> = 
+                                                    </span>
+                                                </template>
+                                                <template x-if="!item.multiplier">
+                                                     <span class="text-gray-400 text-xs">
+                                                        <span x-text="item.value.toFixed(2)"></span> = 
+                                                    </span>
+                                                </template>
+                                                <span class="font-bold w-10 text-right" x-text="item.points.toFixed(2)"></span>
+                                            </div>
+                                        </div>
+                                    </template>
+                                    
+                                    <div class="border-t border-gray-200 mt-4 pt-3 flex justify-between items-center">
+                                        <div class="font-bold text-gray-900">TOTAL</div>
+                                        <div class="font-bold font-mono text-xl" x-text="selectedPlayer.predicted_points.toFixed(2)"></div>
+                                    </div>
+                                </div>
+                            </template>
+                            
+                            <template x-if="!selectedPlayer.breakdown && data.status !== 'live'">
+                                <div class="text-center text-gray-400 py-4 italic">
+                                    Detailed breakdown not available.
+                                </div>
+                            </template>
+                            
+                             <template x-if="data.status === 'live'">
+                                <div class="text-center text-gray-400 py-4 italic">
+                                    Live breakdown coming soon.
+                                </div>
+                            </template>
+                        </div>
+                        
+                        <!-- Close Button (Mobile) -->
+                        <div class="p-4 bg-gray-50 md:hidden">
+                             <button @click="selectedPlayer = null" class="w-full py-3 bg-gray-200 rounded-xl font-bold text-gray-700">Close</button>
+                        </div>
+                    </div>
+                </template>
+            </div>
+        </div>
+
         <!-- Comparison Bar (Only if Live) -->
         <div class="mb-8" x-show="data.status === 'live'">
             <div class="bg-gray-800 rounded-xl p-4 border border-gray-700">
@@ -155,6 +262,7 @@
                 loaded: false,
                 data: null,
                 bench: [],
+                selectedPlayer: null,
                 
                 async init() {
                     try {
@@ -165,6 +273,18 @@
                     } catch (e) {
                         console.error("Failed to load data", e);
                     }
+                },
+                
+                formatBreakdown(bd) {
+                    // Return filtered and sorted keys for display
+                    const order = ['goals', 'assists', 'clean_sheets', 'saves', 'bonus', 'minutes', 'conceded', 'yellow_cards'];
+                    const result = {};
+                    order.forEach(k => {
+                        if (bd[k] && Math.abs(bd[k].points) > 0.01) {
+                            result[k] = bd[k];
+                        }
+                    });
+                    return result;
                 },
 
                 getPlayersByPos(posType, starter) {
@@ -206,7 +326,7 @@
                     const diffColor = p.opponent_difficulty <= 2 ? 'text-green-400' : (p.opponent_difficulty >= 4 ? 'text-red-400' : 'text-gray-400');
                     
                     return `
-                        <div class="player-card w-20 md:w-24 flex flex-col items-center relative group cursor-pointer">
+                        <div class="player-card w-20 md:w-24 flex flex-col items-center relative group cursor-pointer" @click="selectedPlayer = p">
                             ${isCap ? '<div class="absolute -top-2 -right-2 bg-black text-white text-[10px] w-5 h-5 flex items-center justify-center rounded-full border border-white z-10">C</div>' : ''}
                             ${isVice ? '<div class="absolute -top-2 -right-2 bg-gray-600 text-white text-[10px] w-5 h-5 flex items-center justify-center rounded-full border border-white z-10">V</div>' : ''}
                             

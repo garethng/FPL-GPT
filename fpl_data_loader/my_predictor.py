@@ -248,6 +248,68 @@ class Predictor:
             }
         }
 
+    def get_points_breakdown(self, player_id):
+        """Returns a detailed breakdown of predicted points for a player."""
+        # Ensure ratios are trained if not already
+        if not self.global_ratios:
+            self.fetch_data() # This populates history and players too
+            self.train_global_ratios()
+
+        proj = self.calculate_expected_stats(player_id)
+        if not proj: return None
+        
+        stats = proj['stats']
+        pos = proj['pos']
+        
+        # Points calc
+        pts_breakdown = {}
+        
+        # Minutes
+        mins_pts = 0
+        if stats['minutes'] >= 60: mins_pts = PTS_MINS_60
+        elif stats['minutes'] > 0: mins_pts = PTS_MINS_1
+        pts_breakdown['minutes'] = {'value': stats['minutes'], 'points': mins_pts}
+        
+        # Goals
+        g_mult = {1: PTS_GOAL_GK, 2: PTS_GOAL_DEF, 3: PTS_GOAL_MID, 4: PTS_GOAL_FWD}[pos]
+        g_pts = stats['goals'] * g_mult
+        pts_breakdown['goals'] = {'value': stats['goals'], 'points': g_pts, 'multiplier': g_mult}
+        
+        # Assists
+        a_pts = stats['assists'] * PTS_ASSIST
+        pts_breakdown['assists'] = {'value': stats['assists'], 'points': a_pts, 'multiplier': PTS_ASSIST}
+        
+        # Clean Sheets
+        cs_mult = 0
+        if pos in [1, 2]: cs_mult = PTS_CS_DEF
+        elif pos == 3: cs_mult = PTS_CS_MID
+        cs_pts = stats['clean_sheets'] * cs_mult
+        pts_breakdown['clean_sheets'] = {'value': stats['clean_sheets'], 'points': cs_pts, 'multiplier': cs_mult}
+        
+        # Saves
+        s_pts = (stats['saves'] / 3) * PTS_SAVES_3
+        pts_breakdown['saves'] = {'value': stats['saves'], 'points': s_pts}
+        
+        # Conceded
+        gc_pts = 0
+        if pos in [1, 2]:
+            gc_pts = (stats['conceded'] / 2) * PTS_GC_2_DEF
+        pts_breakdown['conceded'] = {'value': stats['conceded'], 'points': gc_pts}
+        
+        # Cards
+        y_pts = stats['yellow_cards'] * PTS_YEL
+        pts_breakdown['yellow_cards'] = {'value': stats['yellow_cards'], 'points': y_pts}
+        
+        # Bonus
+        pts_breakdown['bonus'] = {'value': stats['bonus'], 'points': stats['bonus']}
+        
+        total = mins_pts + g_pts + a_pts + cs_pts + s_pts + gc_pts + y_pts + stats['bonus']
+        
+        return {
+            'total_points': float(f"{total:.2f}"),
+            'breakdown': pts_breakdown
+        }
+
 
     def calculate_points(self, proj):
         stats = proj['stats']
