@@ -11,3 +11,10 @@ FPLTeam.md
 claude.md
 FPL_SQUAD_METHODOLOGY.md
 league_65_complete_data.md
+
+.gemini/
+.gemini-clipboard/
+.cursor/
+.agent/
+.agents/
+.opencode/

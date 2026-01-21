@@ -53,10 +53,16 @@ class FPL:
     """The FPL class."""
 
     def __init__(self):
-        self.session = None
+        self.session = requests.Session()
+        self.session.verify = False
+        self.access_token = None
+        
+        # Suppress insecure request warnings
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-        resp = urlopen(API_URLS["static"], context=ssl_context)
-        static = json.loads(resp.read().decode("utf-8"))
+        resp = requests.get(API_URLS["static"], verify=False)
+        static = resp.json()
         for k, v in static.items():
             try:
                 v = {w["id"]: w for w in v}
