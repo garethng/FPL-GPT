@@ -151,6 +151,52 @@ async def update_data():
     if players_to_upsert:
         supabase.table("players").upsert(players_to_upsert).execute()
     
+    # Merge DGW (Double Gameweek) data - sum up stats for same player in same round
+    from collections import defaultdict
+    history_merged = defaultdict(lambda: {
+        "player_id": None, "fixture_id": None, "opponent_team_id": None,
+        "total_points": 0, "was_home": None, "kickoff_time": None, "round": None,
+        "minutes": 0, "goals_scored": 0, "assists": 0, "clean_sheets": 0,
+        "goals_conceded": 0, "own_goals": 0, "penalties_saved": 0,
+        "penalties_missed": 0, "yellow_cards": 0, "red_cards": 0,
+        "saves": 0, "bonus": 0, "bps": 0, "influence": 0.0,
+        "creativity": 0.0, "threat": 0.0, "ict_index": 0.0
+    })
+    
+    for h in history_to_insert:
+        key = (h['player_id'], h['round'])
+        m = history_merged[key]
+        # Set base fields (keep first occurrence)
+        if m["player_id"] is None:
+            m["player_id"] = h["player_id"]
+            m["round"] = h["round"]
+            m["fixture_id"] = h["fixture_id"]
+            m["opponent_team_id"] = h["opponent_team_id"]
+            m["was_home"] = h["was_home"]
+            m["kickoff_time"] = h["kickoff_time"]
+        # Sum up stats
+        m["total_points"] += h["total_points"]
+        m["minutes"] += h["minutes"]
+        m["goals_scored"] += h["goals_scored"]
+        m["assists"] += h["assists"]
+        m["clean_sheets"] += h["clean_sheets"]
+        m["goals_conceded"] += h["goals_conceded"]
+        m["own_goals"] += h["own_goals"]
+        m["penalties_saved"] += h["penalties_saved"]
+        m["penalties_missed"] += h["penalties_missed"]
+        m["yellow_cards"] += h["yellow_cards"]
+        m["red_cards"] += h["red_cards"]
+        m["saves"] += h["saves"]
+        m["bonus"] += h["bonus"]
+        m["bps"] += h["bps"]
+        m["influence"] += float(h["influence"])
+        m["creativity"] += float(h["creativity"])
+        m["threat"] += float(h["threat"])
+        m["ict_index"] += float(h["ict_index"])
+    
+    history_to_insert = list(history_merged.values())
+    logger.info(f"[{datetime.now()}] Merged DGW data: {len(history_to_insert)} records after merging")
+    
     # Insert history in batches
     if history_to_insert:
         supabase.table("player_history").upsert(history_to_insert, on_conflict="player_id,round").execute()
