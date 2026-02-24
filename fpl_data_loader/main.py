@@ -412,8 +412,7 @@ async def get_classic_league_standings(league_id):
         return None
 
 def get_h2h_league_standings(league_id):
-    response = requests.get(f"https://fantasy.premierleague.com/api/leagues-h2h-matches/league/{league_id}/")
-    data = response.json()
+    data = fetch_all_h2h_league_matches(league_id)
     result = parse_h2h_league(data)
     webhook_url = "https://www.feishu.cn/flow/api/trigger-webhook/0c73dac154c1da3a6af7d08607fb9c34"
     payload = {
@@ -424,100 +423,121 @@ def get_h2h_league_standings(league_id):
     response.raise_for_status()
     return result
 
+def fetch_all_h2h_league_matches(league_id):
+    base_url = f"https://fantasy.premierleague.com/api/leagues-h2h-matches/league/{league_id}/"
+    page = 1
+    has_next = True
+    merged_data = None
+    all_results = []
+
+    while has_next:
+        response = requests.get(base_url, params={"page": page})
+        response.raise_for_status()
+        page_data = response.json()
+
+        if merged_data is None:
+            merged_data = page_data
+
+        all_results.extend(page_data.get("results", []))
+        has_next = page_data.get("has_next", False)
+        logger.info(
+            f"Fetched H2H league {league_id} page={page}, results={len(page_data.get('results', []))}, has_next={has_next}"
+        )
+        page += 1
+
+    if merged_data is None:
+        return {"results": []}
+
+    merged_data["results"] = all_results
+    merged_data["has_next"] = False
+    merged_data["page"] = 1
+    return merged_data
+
 def parse_h2h_league(data):
+    def init_team(match, side):
+        return {
+            'name': match[f'entry_{side}_name'],
+            'player': match[f'entry_{side}_player_name'],
+            'played': 0,
+            'wins': 0,
+            'draws': 0,
+            'losses': 0,
+            'points_for': 0,
+            'points_against': 0,
+            'total_points': 0
+        }
+
     teams = {}
-    for match in data['results']:
+    played_matches = []
+
+    for match in data.get('results', []):
         # Only process matches that have been played (points > 0)
-        if match['entry_1_points'] > 0 or match['entry_2_points'] > 0:
-            # Process team 1
-            team1_id = match['entry_1_entry']
-            if team1_id not in teams:
-                teams[team1_id] = {
-                    'name': match['entry_1_name'],
-                    'player': match['entry_1_player_name'],
-                    'played': 0,
-                    'wins': 0,
-                    'draws': 0,
-                    'losses': 0,
-                    'points_for': 0,
-                    'points_against': 0,
-                    'total_points': 0
-                }
-            
-            # Process team 2
-            team2_id = match['entry_2_entry']
-            if team2_id not in teams:
-                teams[team2_id] = {
-                    'name': match['entry_2_name'],
-                    'player': match['entry_2_player_name'],
-                    'played': 0,
-                    'wins': 0,
-                    'draws': 0,
-                    'losses': 0,
-                    'points_for': 0,
-                    'points_against': 0,
-                    'total_points': 0
-                }
-            
-            # Update stats for both teams
-            teams[team1_id]['played'] += 1
-            teams[team1_id]['points_for'] += match['entry_1_points']
-            teams[team1_id]['points_against'] += match['entry_2_points']
-            teams[team1_id]['wins'] += match['entry_1_win']
-            teams[team1_id]['draws'] += match['entry_1_draw']
-            teams[team1_id]['losses'] += match['entry_1_loss']
-            teams[team1_id]['total_points'] += match['entry_1_total']
-            
-            teams[team2_id]['played'] += 1
-            teams[team2_id]['points_for'] += match['entry_2_points']
-            teams[team2_id]['points_against'] += match['entry_1_points']
-            teams[team2_id]['wins'] += match['entry_2_win']
-            teams[team2_id]['draws'] += match['entry_2_draw']
-            teams[team2_id]['losses'] += match['entry_2_loss']
-            teams[team2_id]['total_points'] += match['entry_2_total']
-    # Convert to list and sort by total points (descending), then points difference
-        standings = []
-        for team_id, stats in teams.items():
-            stats['points_diff'] = stats['points_for'] - stats['points_against']
-            standings.append(stats)
-        # Sort by total points (descending), then points difference (descending)
-        standings.sort(key=lambda x: (-x['total_points'], -x['points_diff']))
-        # Print the standings table
-        str_standings = ""
-        str_standings += "Current Standings\n"
-        str_standings += "-" * 10 + "\n"
-        str_standings += f"{'#':<3} {'Team':<15} {'W':<3} {'D':<3} {'L':<3} {'Pts':<4}\n"
-        str_standings += "-" * 10 + "\n"
-        for i, team in enumerate(standings, 1):
-            # remove blank space in team name
-            str_standings += f"{i:<3} {team['name'].strip():<15} "
-            str_standings += f"{team['wins']:<3} {team['draws']:<3} {team['losses']:<3} "
-            str_standings += f"{team['total_points']:<4}\n"
-        str_standings += "-" * 10 + "\n"
-        # Print summary of played matches
-        str_standings += "\n"
-        str_standings += "Current gameweek:\n"
-        str_standings += "-" * 10 + "\n"
+        if not (match['entry_1_points'] > 0 or match['entry_2_points'] > 0):
+            continue
+
+        played_matches.append(match)
+
+        team1_id = match['entry_1_entry']
+        team2_id = match['entry_2_entry']
+        teams.setdefault(team1_id, init_team(match, 1))
+        teams.setdefault(team2_id, init_team(match, 2))
+
+        teams[team1_id]['played'] += 1
+        teams[team1_id]['points_for'] += match['entry_1_points']
+        teams[team1_id]['points_against'] += match['entry_2_points']
+        teams[team1_id]['wins'] += match['entry_1_win']
+        teams[team1_id]['draws'] += match['entry_1_draw']
+        teams[team1_id]['losses'] += match['entry_1_loss']
+        teams[team1_id]['total_points'] += match['entry_1_total']
+
+        teams[team2_id]['played'] += 1
+        teams[team2_id]['points_for'] += match['entry_2_points']
+        teams[team2_id]['points_against'] += match['entry_1_points']
+        teams[team2_id]['wins'] += match['entry_2_win']
+        teams[team2_id]['draws'] += match['entry_2_draw']
+        teams[team2_id]['losses'] += match['entry_2_loss']
+        teams[team2_id]['total_points'] += match['entry_2_total']
+
+    standings = []
+    for _, stats in teams.items():
+        stats['points_diff'] = stats['points_for'] - stats['points_against']
+        standings.append(stats)
+
+    standings.sort(key=lambda x: (-x['total_points'], -x['points_diff']))
+
+    str_standings = ""
+    str_standings += "Current Standings\n"
+    str_standings += "-" * 10 + "\n"
+    str_standings += f"{'#':<3} {'Team':<15} {'W':<3} {'D':<3} {'L':<3} {'Pts':<4}\n"
+    str_standings += "-" * 10 + "\n"
+    for i, team in enumerate(standings, 1):
+        # remove blank space in team name
+        str_standings += f"{i:<3} {team['name'].strip():<15} "
+        str_standings += f"{team['wins']:<3} {team['draws']:<3} {team['losses']:<3} "
+        str_standings += f"{team['total_points']:<4}\n"
+    str_standings += "-" * 10 + "\n"
+    str_standings += "\n"
+    str_standings += "Current gameweek:\n"
+    str_standings += "-" * 10 + "\n"
 
     event = -1
-    for match in data['results'][::-1]:
-        if match['entry_1_points'] > 0 or match['entry_2_points'] > 0:
-            if event == -1:
-                event = match['event']
-            
-            if match['event'] != event:
-                break
-            
-            winner = "Draw"
-            if match['entry_1_win']:
-                winner = match['entry_1_name']
-            elif match['entry_2_win']:
-                winner = match['entry_2_name']
-            
-            str_standings += f"{match['entry_1_name']} {match['entry_1_points']} - {match['entry_2_points']} {match['entry_2_name']}\n"
-            str_standings += f"  Winner: {winner}\n"
-            str_standings += f"  Event: {match['event']}\n"
-            str_standings += "\n"
+    for match in reversed(played_matches):
+        if event == -1:
+            event = match['event']
+
+        if match['event'] != event:
+            break
+
+        winner = "Draw"
+        if match['entry_1_win']:
+            winner = match['entry_1_name']
+        elif match['entry_2_win']:
+            winner = match['entry_2_name']
+
+        str_standings += f"{match['entry_1_name']} {match['entry_1_points']} - {match['entry_2_points']} {match['entry_2_name']}\n"
+        str_standings += f"  Winner: {winner}\n"
+        str_standings += f"  Event: {match['event']}\n"
+        str_standings += "\n"
     # format str_standings to display beautiful
     str_standings = str_standings.replace("\n", "\n\n")
     str_standings = str_standings.replace("  ", " ")
